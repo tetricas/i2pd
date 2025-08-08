@@ -389,4 +389,5 @@ endif()
 
 if(BUILD_TESTING)
   add_subdirectory(${CMAKE_SOURCE_DIR}/tests ${CMAKE_CURRENT_BINARY_DIR}/tests)
+  add_subdirectory(${CMAKE_SOURCE_DIR}/tests_client ${CMAKE_CURRENT_BINARY_DIR}/tests_client)
 endif()
