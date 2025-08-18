@@ -31,28 +31,22 @@
 #include "Config.h"
 #include "Socks5.h"
 
-namespace i2p
+namespace i2p::data
 {
-namespace data
-{
-
-	Reseeder::Reseeder()
-	{
-	}
-
-	Reseeder::~Reseeder()
-	{
-	}
-
 	/**
 	 @brief tries to bootstrap into I2P network (from local files and servers, with respect of options)
 	 */
 	void Reseeder::Bootstrap ()
 	{
-		std::string su3FileName; i2p::config::GetOption("reseed.file", su3FileName);
-		std::string zipFileName; i2p::config::GetOption("reseed.zipfile", zipFileName);
+		std::string riFileName; config::GetOption("reseed.floodfill", riFileName);
+		std::string su3FileName; config::GetOption("reseed.file", su3FileName);
+		std::string zipFileName; config::GetOption("reseed.zipfile", zipFileName);
 
-		if (su3FileName.length() > 0) // bootstrap from SU3 file or URL
+		if (!riFileName.empty()) // bootstrap from router.info file
+		{
+			ProcessRIFile(riFileName.c_str ());
+		}
+		else if (!su3FileName.empty()) // bootstrap from SU3 file or URL
 		{
 			int num;
 			if (su3FileName.length() > 8 && su3FileName.substr(0, 8) == "https://")
@@ -66,16 +60,14 @@ namespace data
 			if (num == 0)
 				LogPrint (eLogWarning, "Reseed: Failed to reseed from ", su3FileName);
 		}
-		else if (zipFileName.length() > 0) // bootstrap from ZIP file
+		else if (!zipFileName.empty()) // bootstrap from ZIP file
 		{
-			int num = ProcessZIPFile (zipFileName.c_str ());
-			if (num == 0)
+			if (const int num = ProcessZIPFile (zipFileName.c_str ()); num == 0)
 				LogPrint (eLogWarning, "Reseed: Failed to reseed from ", zipFileName);
 		}
 		else // bootstrap from reseed servers
 		{
-			int num = ReseedFromServers ();
-			if (num == 0)
+			if (const int num = ReseedFromServers (); num == 0)
 				LogPrint (eLogWarning, "Reseed: Failed to reseed from servers");
 		}
 	}
@@ -86,23 +78,23 @@ namespace data
 	 */
 	int Reseeder::ReseedFromServers ()
 	{
-		bool ipv6; i2p::config::GetOption("ipv6", ipv6);
-		bool ipv4; i2p::config::GetOption("ipv4", ipv4);
-		bool yggdrasil; i2p::config::GetOption("meshnets.yggdrasil", yggdrasil);
+		bool ipv6; config::GetOption("ipv6", ipv6);
+		bool ipv4; config::GetOption("ipv4", ipv4);
+		bool yggdrasil; config::GetOption("meshnets.yggdrasil", yggdrasil);
 
 		std::vector<std::string> httpsReseedHostList;
 		if (ipv4 || ipv6)
 		{
-			std::string reseedURLs; i2p::config::GetOption("reseed.urls", reseedURLs);
+			std::string reseedURLs; config::GetOption("reseed.urls", reseedURLs);
 			if (!reseedURLs.empty ())
 				boost::split(httpsReseedHostList, reseedURLs, boost::is_any_of(","), boost::token_compress_on);
 		}
 
 		std::vector<std::string> yggReseedHostList;
-		if (yggdrasil && !i2p::util::net::GetYggdrasilAddress ().is_unspecified ())
+		if (yggdrasil && !util::net::GetYggdrasilAddress ().is_unspecified ())
 		{
 			LogPrint (eLogInfo, "Reseed: Yggdrasil is supported");
-			std::string yggReseedURLs; i2p::config::GetOption("reseed.yggurls", yggReseedURLs);
+			std::string yggReseedURLs; config::GetOption("reseed.yggurls", yggReseedURLs);
 			if (!yggReseedURLs.empty ())
 				boost::split(yggReseedHostList, yggReseedURLs, boost::is_any_of(","), boost::token_compress_on);
 		}
@@ -137,46 +129,75 @@ namespace data
 	int Reseeder::ReseedFromSU3Url (const std::string& url, bool isHttps)
 	{
 		LogPrint (eLogInfo, "Reseed: Downloading SU3 from ", url);
-		std::string su3 = isHttps ? HttpsRequest (url) : YggdrasilRequest (url);
-		if (su3.length () > 0)
+		if (const std::string su3 = isHttps ? HttpsRequest (url) : YggdrasilRequest (url); su3.length () > 0)
 		{
 			std::stringstream s(su3);
 			return ProcessSU3Stream (s);
 		}
-		else
+
+		LogPrint (eLogWarning, "Reseed: SU3 download failed");
+		return 0;
+	}
+
+	void Reseeder::ProcessRIFile (const char * filename)
+	{
+		const RouterInfo ri(filename);
+		if (!netdb.AddRouterInfo(ri.GetBuffer(), static_cast<int>(ri.GetBufferLen())))
 		{
-			LogPrint (eLogWarning, "Reseed: SU3 download failed");
-			return 0;
+			LogPrint(eLogCritical, "Reseed: AddRouterInfo returned false");
+			return;
 		}
+
+		LogPrint(eLogInfo, "Reseed: inserted RI ", ri.GetIdentHashBase64(), " into netDb");
+
+		auto ts = util::GetMillisecondsSinceEpoch ();
+		bool isOutdated = false;
+		netdb.VisitRouterInfos (
+			[&isOutdated, ts](std::shared_ptr<const RouterInfo> r)
+			{
+				if (r && ts > r->GetTimestamp () + 10 * NETDB_MAX_EXPIRATION_TIMEOUT * 1000LL) // 270 hours
+				{
+					LogPrint (eLogError, "Reseed: Router ", r->GetIdentHash().ToBase64 (), " is outdated by ", (ts - r->GetTimestamp ())/1000LL/3600LL, " hours");
+					isOutdated = true;
+				}
+			});
+		if (isOutdated) // more than half
+		{
+			LogPrint (eLogError, "Reseed: Mammoth's shit\n"
+			"	   *_____*\n"
+			"	  *_*****_*\n"
+			"	 *_(O)_(O)_*\n"
+			"	**____V____**\n"
+			"	**_________**\n"
+			"	**_________**\n"
+			"	 *_________*\n"
+			"	  ***___***");
+			netdb.ClearRouterInfos ();
+		}
+		netdb.RequestDestination(ri.GetIdentHash());
 	}
 
 	int Reseeder::ProcessSU3File (const char * filename)
 	{
-		std::ifstream s(filename, std::ifstream::binary);
-		if (s.is_open ())
+		if (std::ifstream s(filename, std::ifstream::binary); s.is_open ())
 			return ProcessSU3Stream (s);
-		else
-		{
-			LogPrint (eLogCritical, "Reseed: Can't open file ", filename);
-			return 0;
-		}
+
+		LogPrint (eLogCritical, "Reseed: Can't open file ", filename);
+		return 0;
 	}
 
 	int Reseeder::ProcessZIPFile (const char * filename)
 	{
-		std::ifstream s(filename, std::ifstream::binary);
-		if (s.is_open ())
+		if (std::ifstream s(filename, std::ifstream::binary); s.is_open ())
 		{
 			s.seekg (0, std::ios::end);
-			auto len = s.tellg ();
+			const auto len = s.tellg ();
 			s.seekg (0, std::ios::beg);
 			return ProcessZIPStream (s, len);
 		}
-		else
-		{
-			LogPrint (eLogCritical, "Reseed: Can't open file ", filename);
-			return 0;
-		}
+
+		LogPrint (eLogCritical, "Reseed: Can't open file ", filename);
+		return 0;
 	}
 
 	const char SU3_MAGIC_NUMBER[]="I2Psu3";
@@ -228,7 +249,7 @@ namespace data
 		s.read (signerID, signerIDLength); // signerID
 		signerID[signerIDLength] = 0;
 
-		bool verify; i2p::config::GetOption("reseed.verify", verify);
+		bool verify; config::GetOption("reseed.verify", verify);
 		if (verify)
 		{
 			//try to verify signature
@@ -255,9 +276,9 @@ namespace data
 						BIGNUM * s = BN_new (), * n = BN_new ();
 						BN_bin2bn (signature, signatureLength, s);
 						BN_bin2bn (it->second, 512, n); // RSA 4096 assumed
-						BN_mod_exp (s, s, i2p::crypto::GetRSAE (), n, bnctx); // s = s^e mod n
+						BN_mod_exp (s, s, crypto::GetRSAE (), n, bnctx); // s = s^e mod n
 						uint8_t * enSigBuf = new uint8_t[signatureLength];
-						i2p::crypto::bn2buf (s, enSigBuf, signatureLength);
+						crypto::bn2buf (s, enSigBuf, signatureLength);
 						// digest is right aligned
 						// we can't use RSA_verify due wrong padding in SU3
 						if (memcmp (enSigBuf + (signatureLength - 64), digest, 64))
@@ -380,7 +401,7 @@ namespace data
 						uncompressedSize -= inflator.avail_out;
 						if (crc32 (0, uncompressed, uncompressedSize) == crc_32)
 						{
-							i2p::data::netdb.AddRouterInfo (uncompressed, uncompressedSize);
+							netdb.AddRouterInfo (uncompressed, uncompressedSize);
 							numFiles++;
 						}
 						else
@@ -393,7 +414,7 @@ namespace data
 				}
 				else // no compression
 				{
-					i2p::data::netdb.AddRouterInfo (compressed, compressedSize);
+					netdb.AddRouterInfo (compressed, compressedSize);
 					numFiles++;
 				}
 				delete[] compressed;
@@ -412,12 +433,12 @@ namespace data
 		}
 		if (numFiles) // check if routers are not outdated
 		{
-			auto ts = i2p::util::GetMillisecondsSinceEpoch ();
+			auto ts = util::GetMillisecondsSinceEpoch ();
 			int numOutdated = 0;
-			i2p::data::netdb.VisitRouterInfos (
+			netdb.VisitRouterInfos (
 				[&numOutdated, ts](std::shared_ptr<const RouterInfo> r)
 				{
-					if (r && ts > r->GetTimestamp () + 10*i2p::data::NETDB_MAX_EXPIRATION_TIMEOUT*1000LL) // 270 hours
+					if (r && ts > r->GetTimestamp () + 10*NETDB_MAX_EXPIRATION_TIMEOUT*1000LL) // 270 hours
 					{
 						LogPrint (eLogError, "Reseed: Router ", r->GetIdentHash().ToBase64 (), " is outdated by ", (ts - r->GetTimestamp ())/1000LL/3600LL, " hours");
 						numOutdated++;
@@ -434,7 +455,7 @@ namespace data
 				"	**_________**\n"
 				"	 *_________*\n"
 				"	  ***___***");
-				i2p::data::netdb.ClearRouterInfos ();
+				netdb.ClearRouterInfos ();
 				numFiles = 0;
 			}
 		}
@@ -497,7 +518,7 @@ namespace data
 				if (n)
 				{	
 					PublicKey value;
-					i2p::crypto::bn2buf (n, value, 512);
+					crypto::bn2buf (n, value, 512);
 					if (cn)
 						m_SigningKeys[cn] = value;
 					else
@@ -518,12 +539,12 @@ namespace data
 
 	void Reseeder::LoadCertificates ()
 	{
-		std::string certDir = i2p::fs::GetCertsDir() + i2p::fs::dirSep + "reseed";
+		std::string certDir = fs::GetCertsDir() + fs::dirSep + "reseed";
 
 		std::vector<std::string> files;
 		int numCertificates = 0;
 
-		if (!i2p::fs::ReadDir(certDir, files)) {
+		if (!fs::ReadDir(certDir, files)) {
 			LogPrint(eLogWarning, "Reseed: Can't load reseed certificates from ", certDir);
 			return;
 		}
@@ -541,8 +562,8 @@ namespace data
 
 	std::string Reseeder::HttpsRequest (const std::string& address)
 	{
-		i2p::http::URL proxyUrl;
-		std::string proxy; i2p::config::GetOption("reseed.proxy", proxy);
+		http::URL proxyUrl;
+		std::string proxy; config::GetOption("reseed.proxy", proxy);
 		// check for proxy url
 		if(proxy.size()) {
 			// parse
@@ -562,7 +583,7 @@ namespace data
 				return "";
 			}
 		}
-		i2p::http::URL url;
+		http::URL url;
 		if (!url.parse(address)) {
 			LogPrint(eLogCritical, "Reseed: Failed to parse url: ", address);
 			return "";
@@ -590,12 +611,12 @@ namespace data
 					auto & sock = s.next_layer();
 					if(proxyUrl.schema == "http")
 					{
-						i2p::http::HTTPReq proxyReq;
-						i2p::http::HTTPRes proxyRes;
+						http::HTTPReq proxyReq;
+						http::HTTPRes proxyRes;
 						proxyReq.method = "CONNECT";
 						proxyReq.version = "HTTP/1.1";
 						proxyReq.uri = url.host + ":" + std::to_string(url.port);
-						auto auth = i2p::http::CreateBasicAuthorizationString (proxyUrl.user, proxyUrl.pass);
+						auto auth = http::CreateBasicAuthorizationString (proxyUrl.user, proxyUrl.pass);
 						if (!auth.empty ())
 							proxyReq.AddHeader("Proxy-Authorization", auth);
 
@@ -635,7 +656,7 @@ namespace data
 						// assume socks if not http, is checked before this for other types
 						// TODO: support username/password auth etc
 						bool success = false;
-						i2p::transport::Socks5Handshake (sock, std::make_pair(url.host, url.port),
+						transport::Socks5Handshake (sock, std::make_pair(url.host, url.port),
 							[&success](const boost::system::error_code& ec) 
 						    { 
 								if (!ec)
@@ -667,10 +688,10 @@ namespace data
 					if (!ep.address ().is_unspecified ())
 					{
 						if (ep.address ().is_v4 ())
-							supported = i2p::context.SupportsV4 ();
+							supported = context.SupportsV4 ();
 						else if (ep.address ().is_v6 ())
-							supported = i2p::util::net::IsYggdrasilAddress (ep.address ()) ? 
-								i2p::context.SupportsMesh () : i2p::context.SupportsV6 ();
+							supported = util::net::IsYggdrasilAddress (ep.address ()) ? 
+								context.SupportsMesh () : context.SupportsV6 ();
 					}	
 					if (supported)
 					{
@@ -711,7 +732,7 @@ namespace data
 	std::string Reseeder::ReseedRequest (Stream& s, const std::string& uri)
 	{
 		boost::system::error_code ecode;
-		i2p::http::HTTPReq req;
+		http::HTTPReq req;
 		req.uri = uri;
 		req.AddHeader("User-Agent", "Wget/1.11.4");
 		req.AddHeader("Connection", "close");
@@ -725,7 +746,7 @@ namespace data
 		} while (!ecode && l);
 		// process response
 		std::string data = rs.str();
-		i2p::http::HTTPRes res;
+		http::HTTPRes res;
 		int len = res.parse(data);
 		if (len <= 0) {
 			LogPrint(eLogWarning, "Reseed: Incomplete/broken response from ", uri);
@@ -739,7 +760,7 @@ namespace data
 		LogPrint(eLogDebug, "Reseed: Got ", data.length(), " bytes of data from ", uri);
 		if (res.is_chunked()) {
 			std::stringstream in(data), out;
-			if (!i2p::http::MergeChunkedResponse(in, out)) {
+			if (!http::MergeChunkedResponse(in, out)) {
 				LogPrint(eLogWarning, "Reseed: Failed to merge chunked response from ", uri);
 				return "";
 			}
@@ -751,7 +772,7 @@ namespace data
 
 	std::string Reseeder::YggdrasilRequest (const std::string& address)
 	{
-		i2p::http::URL url;
+		http::URL url;
 		if (!url.parse(address))
 		{
 			LogPrint(eLogError, "Reseed: Failed to parse url: ", address);
@@ -772,8 +793,8 @@ namespace data
 			{
 				boost::asio::ip::tcp::endpoint ep = it;
 				if (
-					i2p::util::net::IsYggdrasilAddress (ep.address ()) &&
-					i2p::context.SupportsMesh ()
+					util::net::IsYggdrasilAddress (ep.address ()) &&
+					context.SupportsMesh ()
 				)
 				{
 					LogPrint (eLogDebug, "Reseed: Yggdrasil: Resolved to ", ep.address ());
@@ -802,5 +823,4 @@ namespace data
 
 		return "";
 	}
-}
 }

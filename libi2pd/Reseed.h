@@ -27,10 +27,11 @@ namespace data
 
 		public:
 
-			Reseeder();
-			~Reseeder();
+			Reseeder() = default;
+			~Reseeder() = default;
 			void Bootstrap ();
 			int ReseedFromServers ();
+			void ProcessRIFile (const char * filename);
 			int ProcessSU3File (const char * filename);
 			int ProcessZIPFile (const char * filename);
 
