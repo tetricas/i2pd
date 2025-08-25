@@ -183,9 +183,6 @@ void start_core()
 
     LogPrint(eLogInfo, "Starting Router context");
     i2p::context.Start();
-
-    LogPrint(eLogInfo, "Starting Client");
-    i2p::client::context.Start();
 }
 
 void stop_core()
@@ -198,29 +195,39 @@ void stop_core()
 
 void recvLoop(std::shared_ptr<i2p::stream::Stream> stream, const std::string& mode)
 {
-    std::uint8_t buf[64*1024];
-    size_t n = 0;
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(RECV_TIMEOUT_S * 3);
-    while (std::chrono::steady_clock::now() < deadline && stream->IsOpen())
+    uint8_t recv_buf[4096];
+    std::string data;
+    bool end = false;
+    int numAttempts = 0;
+    while (!end)
     {
-        n = stream->Receive(buf, sizeof(buf), RECV_TIMEOUT_S); // short per-try timeout
-        if (n > 0)
-            break;          // got data
-        if (n == 0) {       // error
-            LogPrint(eLogWarning, mode, ": receive error");
-            stream->Close();
-            return;
+        if (const size_t received = stream->Receive (recv_buf, 4096, RECV_TIMEOUT_S * 2))
+        {
+            data.append (reinterpret_cast<char *>(recv_buf), received);
+            if (!stream->IsOpen ())
+                end = true;
+        }
+        else if (!stream->IsOpen () || !g_running)
+            end = true;
+        else
+        {
+            LogPrint (eLogError, "Client-server: request timeout expired");
+            numAttempts++;
+            if (numAttempts > 5)
+                end = true;
         }
     }
+    // process remaining buffer
+    while (const size_t len = stream->ReadSome (recv_buf, sizeof(recv_buf)) && g_running)
+        data.append (reinterpret_cast<char *>(recv_buf), len);
 
-    if (n > 0)
+    if (!data.empty() && !g_running)
     {
-        const std::string got(reinterpret_cast<char*>(buf), n);
-        LogPrint(eLogNone, mode, " got: [", got, "]");
+        LogPrint(eLogNone, mode, " got: [", data, "]");
 
         if (mode == "Server")
         {
-            const std::string reply = "echo: " + got;
+            const std::string reply = "echo: " + data;
             if (auto sent = stream->Send(reinterpret_cast<const uint8_t*>(reply.data()), reply.size()); sent != reply.size())
                 LogPrint(eLogNone, mode, ": partial send: ", sent);
         }
@@ -274,7 +281,7 @@ int main(int argc, char** argv) try {
             if (pingOnly)
             {
                 s->SendPing();
-                std::this_thread::sleep_for(1min); // populate logs
+                std::this_thread::sleep_for(3min); // populate logs
                 g_running.store(false);
             }
             else
@@ -323,7 +330,7 @@ int main(int argc, char** argv) try {
 
         if (pingOnly)
         {
-            stream->SendPing();
+            stream->SendPing("hello");
             std::this_thread::sleep_for(3min); // populate logs
             return 0;
         }

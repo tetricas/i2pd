@@ -610,6 +610,11 @@ namespace stream
 			p.len = payloadLen + 22;
 			SendPackets (std::vector<Packet *> { &p });
 			LogPrint (eLogDebug, "Streaming: Pong of ", p.len, " bytes sent");
+			if (payloadLen > 0)
+			{
+				std::string payload (p.GetPayload (), p.GetPayload () + payloadLen);
+				LogPrint (eLogDebug, "Streaming: Pong payload: ", payload);
+			}
 		}
 		m_LocalDestination.DeletePacket (packet);
 	}
@@ -1169,7 +1174,7 @@ namespace stream
 		LogPrint (eLogDebug, "Streaming: Quick Ack sent. ", (int)numNacks, " NACKs");
 	}
 
-	void Stream::SendPing ()
+	void Stream::SendPing (std::string data)
 	{
 		Packet p;
 		uint8_t * packet = p.GetBuffer ();
@@ -1199,6 +1204,11 @@ namespace stream
 		memset (signature, 0, signatureLen); // zeroes for now
 		size += signatureLen; // signature
 		htobe16buf (optionsSize, packet + size - 2 - optionsSize); // actual options size
+		if (!data.empty ())
+		{
+			memcpy (const_cast<uint8_t*>(p.GetPayload()), data.c_str(), data.size ());
+			size += data.size ();
+		}
 		m_LocalDestination.GetOwner ()->Sign (packet, size, signature);
 		p.len = size;
 		SendPackets (std::vector<Packet *> { &p });
@@ -1955,6 +1965,12 @@ namespace stream
 			{
 				// ping
 				LogPrint (eLogInfo, "Streaming: Ping received sSID=", sendStreamID);
+				auto payloadLen = int(packet->len) - (packet->GetPayload () - packet->buf);
+				if (payloadLen > 0)
+				{
+					std::string payload (packet->GetPayload (), packet->GetPayload () + payloadLen);
+					LogPrint (eLogInfo, "Streaming: Ping payload: ", payload);
+				}
 				auto s = std::make_shared<Stream> (m_Owner->GetService (), *this);
 				s->HandlePing (packet);
 			}
