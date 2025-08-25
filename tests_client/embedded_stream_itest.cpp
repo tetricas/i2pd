@@ -280,8 +280,30 @@ int main(int argc, char** argv) try {
             LogPrint(eLogInfo, "Server got: stream");
             if (pingOnly)
             {
-                s->SendPing();
-                std::this_thread::sleep_for(3min); // populate logs
+                // Test SimpleReceive - wait for client message
+                uint8_t recvBuf[1024];
+                LogPrint(eLogInfo, "Server: Waiting for simple message...");
+                size_t received = s->SimpleReceive(recvBuf, sizeof(recvBuf), 15000);
+                
+                if (received > 0)
+                {
+                    std::string clientMsg(reinterpret_cast<char*>(recvBuf), received);
+                    LogPrint(eLogInfo, "Server: SimpleReceive success, got: [", clientMsg, "]");
+                    
+                    // Send response back to client
+                    const std::string response = "server echo: " + clientMsg;
+                    LogPrint(eLogInfo, "Server: Sending response: ", response);
+                    
+                    size_t sent = s->SimpleSend(reinterpret_cast<const uint8_t*>(response.data()), response.size(), 5000);
+                    if (sent != response.size())
+                        LogPrint(eLogError, "Server: SimpleSend failed, sent=", sent, ", expected=", response.size());
+                    else
+                        LogPrint(eLogInfo, "Server: SimpleSend success, sent=", sent, " bytes");
+                }
+                else
+                    LogPrint(eLogWarning, "Server: SimpleReceive timeout or failed");
+                
+                std::this_thread::sleep_for(2s); // brief wait before exit
                 g_running.store(false);
             }
             else
@@ -330,8 +352,28 @@ int main(int argc, char** argv) try {
 
         if (pingOnly)
         {
-            stream->SendPing("hello");
-            std::this_thread::sleep_for(3min); // populate logs
+            // Test SimpleSend - send message to server
+            const std::string testMsg = "hello from client";
+            LogPrint(eLogInfo, "Client: Sending simple message: ", testMsg);
+            
+            size_t sent = stream->SimpleSend(reinterpret_cast<const uint8_t*>(testMsg.data()), testMsg.size(), 5000);
+            if (sent != testMsg.size())
+                LogPrint(eLogError, "Client: SimpleSend failed, sent=", sent, ", expected=", testMsg.size());
+            else
+                LogPrint(eLogInfo, "Client: SimpleSend success, sent=", sent, " bytes");
+            
+            // Test SimpleReceive - wait for server response
+            uint8_t recvBuf[1024];
+            size_t received = stream->SimpleReceive(recvBuf, sizeof(recvBuf), 10000);
+            if (received > 0)
+            {
+                std::string response(reinterpret_cast<char*>(recvBuf), received);
+                LogPrint(eLogInfo, "Client: SimpleReceive success, got: [", response, "]");
+            }
+            else
+                LogPrint(eLogWarning, "Client: SimpleReceive timeout or failed");
+            
+            std::this_thread::sleep_for(3s); // brief wait before exit
             return 0;
         }
 

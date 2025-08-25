@@ -85,6 +85,12 @@ namespace stream
 	const bool LOSS_BASED_CONTROL_ENABLED = 0; // 0/1
 	const uint64_t STREAMING_DESTINATION_POOLS_CLEANUP_INTERVAL = 646; // in seconds
 	
+	// Constants for simplified messaging
+	const uint8_t SIMPLE_MESSAGE_ECHO_REQUEST = 0x01;
+	const uint8_t SIMPLE_MESSAGE_ECHO_RESPONSE = 0x02;  
+	const uint8_t SIMPLE_MESSAGE_DATA_ONLY = 0x03;
+	const size_t SIMPLE_MESSAGE_HEADER_SIZE = 5; // type(1) + seq(2) + len(2)
+	
 	struct Packet
 	{
 		size_t len, offset;
@@ -206,6 +212,12 @@ namespace stream
 			size_t Send (const uint8_t * buf, size_t len);
 			void AsyncSend (const uint8_t * buf, size_t len, SendHandler handler);
 			void SendPing (std::string data = "");
+			
+			// Simplified send-receive methods
+			size_t SimpleSend (const uint8_t * buf, size_t len, int timeout_ms = 5000);
+			size_t SimpleReceive (uint8_t * buf, size_t len, int timeout_ms = 10000);
+			void SendEcho (const std::string& data, bool expectResponse = false);
+			std::string ReceiveEcho (int timeout_ms = 10000);
 
 			template<typename Buffer, typename ReceiveHandler>
 			void AsyncReceive (const Buffer& buffer, ReceiveHandler handler, int timeout = 0);
@@ -317,6 +329,11 @@ namespace stream
 			uint64_t m_JitterAccum;
 			int m_JitterDiv;
 			size_t m_MTU;
+			
+			// Simplified messaging state
+			uint16_t m_SimpleSeqNumber;
+			std::queue<std::string> m_SimpleMessageQueue;
+			std::mutex m_SimpleMessageMutex;
 	};
 
 	class StreamingDestination: public std::enable_shared_from_this<StreamingDestination>

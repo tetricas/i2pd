@@ -14,6 +14,8 @@
 #include "Timestamp.h"
 #include "Destination.h"
 #include "Streaming.h"
+#include <chrono>
+#include <thread>
 
 namespace i2p
 {
@@ -101,7 +103,8 @@ namespace stream
 		m_Jitter (0), m_MinPacingTime (0),
 		m_PacingTime (INITIAL_PACING_TIME), m_PacingTimeRem (0), m_LastSendTime (0), m_LastACKRecieveTime (0), m_ACKRecieveInterval (local.GetOwner ()->GetStreamingAckDelay ()), m_RemoteLeaseChangeTime (0), m_LastWindowIncTime (0), m_LastACKRequestTime (0),
 		m_LastACKSendTime (0), m_PacketACKInterval (1), m_PacketACKIntervalRem (0), // for limit inbound speed
-		m_NumResendAttempts (0), m_NumPacketsToSend (0), m_JitterAccum (0), m_JitterDiv (1), m_MTU (STREAMING_MTU)
+		m_NumResendAttempts (0), m_NumPacketsToSend (0), m_JitterAccum (0), m_JitterDiv (1), m_MTU (STREAMING_MTU),
+		m_SimpleSeqNumber (0)
 	{
 		RAND_bytes ((uint8_t *)&m_RecvStreamID, 4);
 		m_RemoteIdentity = remote->GetIdentity ();
@@ -131,7 +134,8 @@ namespace stream
 		m_PrevRTTSample (INITIAL_RTT), m_Jitter (0), m_MinPacingTime (0),
 		m_PacingTime (INITIAL_PACING_TIME), m_PacingTimeRem (0), m_LastSendTime (0), m_LastACKRecieveTime (0), m_ACKRecieveInterval (local.GetOwner ()->GetStreamingAckDelay ()), m_RemoteLeaseChangeTime (0), m_LastWindowIncTime (0), m_LastACKRequestTime (0),
 		m_LastACKSendTime (0), m_PacketACKInterval (1), m_PacketACKIntervalRem (0), // for limit inbound speed
-		m_NumResendAttempts (0), m_NumPacketsToSend (0), m_JitterAccum (0), m_JitterDiv (1), m_MTU (STREAMING_MTU)
+		m_NumResendAttempts (0), m_NumPacketsToSend (0), m_JitterAccum (0), m_JitterDiv (1), m_MTU (STREAMING_MTU),
+		m_SimpleSeqNumber (0)
 	{
 		RAND_bytes ((uint8_t *)&m_RecvStreamID, 4);
 		auto outboundSpeed = local.GetOwner ()->GetStreamingOutboundSpeed ();
@@ -597,23 +601,74 @@ namespace stream
 		uint16_t flags = packet->GetFlags ();
 		if (ProcessOptions (flags, packet) && m_RemoteIdentity)
 		{
-			// send pong
-			Packet p;
-			memset (p.buf, 0, 22); // minimal header all zeroes
-			memcpy (p.buf + 4, packet->buf, 4); // but receiveStreamID is the sendStreamID from the ping
-			htobe16buf (p.buf + 18, PACKET_FLAG_ECHO); // and echo flag
 			auto payloadLen = int(packet->len) - (packet->GetPayload () - packet->buf);
-			if (payloadLen > 0)
-				memcpy (p.buf + 22, packet->GetPayload (), payloadLen);
-			else
-				payloadLen = 0;
-			p.len = payloadLen + 22;
-			SendPackets (std::vector<Packet *> { &p });
-			LogPrint (eLogDebug, "Streaming: Pong of ", p.len, " bytes sent");
-			if (payloadLen > 0)
+			bool isSimpleMessage = false;
+			
+			// Check if this is a simple message (has our header format)
+			if (payloadLen >= SIMPLE_MESSAGE_HEADER_SIZE)
 			{
-				std::string payload (p.GetPayload (), p.GetPayload () + payloadLen);
-				LogPrint (eLogDebug, "Streaming: Pong payload: ", payload);
+				const uint8_t* payload = packet->GetPayload();
+				uint8_t msgType = payload[0];
+				
+				// Check if it's one of our simple message types
+				if (msgType == SIMPLE_MESSAGE_ECHO_REQUEST || 
+					msgType == SIMPLE_MESSAGE_ECHO_RESPONSE || 
+					msgType == SIMPLE_MESSAGE_DATA_ONLY)
+				{
+					isSimpleMessage = true;
+					uint16_t seqNum = bufbe16toh(payload + 1);
+					uint16_t dataLen = bufbe16toh(payload + 3);
+					
+					// Validate message format
+					if (SIMPLE_MESSAGE_HEADER_SIZE + dataLen == payloadLen)
+					{
+						// Extract the full message and add to queue
+						std::string message(reinterpret_cast<const char*>(payload), payloadLen);
+						
+						{
+							std::unique_lock<std::mutex> lock(m_SimpleMessageMutex);
+							m_SimpleMessageQueue.push(message);
+						}
+						
+						LogPrint (eLogDebug, "Streaming: Simple message received, type=", (int)msgType, 
+							", seq=", seqNum, ", dataLen=", dataLen);
+						
+						// Send response if requested
+						if (msgType == SIMPLE_MESSAGE_ECHO_REQUEST && dataLen > 0)
+						{
+							std::string responseData(reinterpret_cast<const char*>(payload + SIMPLE_MESSAGE_HEADER_SIZE), dataLen);
+							SendEcho(responseData, false); // Send as data only (response)
+						}
+					}
+					else
+					{
+						LogPrint (eLogWarning, "Streaming: Invalid simple message format, expected len=", 
+							SIMPLE_MESSAGE_HEADER_SIZE + dataLen, ", actual=", payloadLen);
+						isSimpleMessage = false;
+					}
+				}
+			}
+			
+			// If not a simple message, handle as regular ping/pong
+			if (!isSimpleMessage)
+			{
+				// send pong
+				Packet p;
+				memset (p.buf, 0, 22); // minimal header all zeroes
+				memcpy (p.buf + 4, packet->buf, 4); // but receiveStreamID is the sendStreamID from the ping
+				htobe16buf (p.buf + 18, PACKET_FLAG_ECHO); // and echo flag
+				if (payloadLen > 0)
+					memcpy (p.buf + 22, packet->GetPayload (), payloadLen);
+				else
+					payloadLen = 0;
+				p.len = payloadLen + 22;
+				SendPackets (std::vector<Packet *> { &p });
+				LogPrint (eLogDebug, "Streaming: Pong of ", p.len, " bytes sent");
+				if (payloadLen > 0)
+				{
+					std::string payload (p.GetPayload (), p.GetPayload () + payloadLen);
+					LogPrint (eLogDebug, "Streaming: Pong payload: ", payload);
+				}
 			}
 		}
 		m_LocalDestination.DeletePacket (packet);
@@ -1213,6 +1268,101 @@ namespace stream
 		p.len = size;
 		SendPackets (std::vector<Packet *> { &p });
 		LogPrint (eLogDebug, "Streaming: Ping of ", p.len, " bytes sent");
+	}
+
+	// Simplified send-receive methods implementation
+	size_t Stream::SimpleSend (const uint8_t * buf, size_t len, int timeout_ms)
+	{
+		if (!buf || !len || len > MAX_PACKET_SIZE - SIMPLE_MESSAGE_HEADER_SIZE)
+			return 0;
+			
+		// Create message with header: type(1) + seq(2) + len(2) + data
+		std::string message;
+		message.resize(SIMPLE_MESSAGE_HEADER_SIZE + len);
+		
+		message[0] = SIMPLE_MESSAGE_DATA_ONLY; // message type
+		htobe16buf(reinterpret_cast<uint8_t*>(&message[1]), ++m_SimpleSeqNumber); // sequence
+		htobe16buf(reinterpret_cast<uint8_t*>(&message[3]), len); // data length
+		memcpy(&message[SIMPLE_MESSAGE_HEADER_SIZE], buf, len); // data
+		
+		SendPing(message); // Use existing ping mechanism
+		return len;
+	}
+	
+	size_t Stream::SimpleReceive (uint8_t * buf, size_t len, int timeout_ms)
+	{
+		if (!buf || !len)
+			return 0;
+			
+		auto start_time = std::chrono::steady_clock::now();
+		
+		while (std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::steady_clock::now() - start_time).count() < timeout_ms)
+		{
+			std::unique_lock<std::mutex> lock(m_SimpleMessageMutex);
+			if (!m_SimpleMessageQueue.empty())
+			{
+				auto message = m_SimpleMessageQueue.front();
+				m_SimpleMessageQueue.pop();
+				lock.unlock();
+				
+				// Extract data from message (skip header)
+				if (message.size() > SIMPLE_MESSAGE_HEADER_SIZE)
+				{
+					size_t data_len = std::min(len, message.size() - SIMPLE_MESSAGE_HEADER_SIZE);
+					memcpy(buf, message.data() + SIMPLE_MESSAGE_HEADER_SIZE, data_len);
+					return data_len;
+				}
+			}
+			lock.unlock();
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+		
+		return 0; // timeout
+	}
+	
+	void Stream::SendEcho (const std::string& data, bool expectResponse)
+	{
+		if (data.size() > MAX_PACKET_SIZE - SIMPLE_MESSAGE_HEADER_SIZE)
+			return;
+			
+		std::string message;
+		message.resize(SIMPLE_MESSAGE_HEADER_SIZE + data.size());
+		
+		uint8_t msg_type = expectResponse ? SIMPLE_MESSAGE_ECHO_REQUEST : SIMPLE_MESSAGE_DATA_ONLY;
+		message[0] = msg_type;
+		htobe16buf(reinterpret_cast<uint8_t*>(&message[1]), ++m_SimpleSeqNumber);
+		htobe16buf(reinterpret_cast<uint8_t*>(&message[3]), data.size());
+		memcpy(&message[SIMPLE_MESSAGE_HEADER_SIZE], data.data(), data.size());
+		
+		SendPing(message);
+		LogPrint (eLogDebug, "Streaming: Echo sent, type=", (int)msg_type, ", len=", data.size());
+	}
+	
+	std::string Stream::ReceiveEcho (int timeout_ms)
+	{
+		auto start_time = std::chrono::steady_clock::now();
+		
+		while (std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::steady_clock::now() - start_time).count() < timeout_ms)
+		{
+			std::unique_lock<std::mutex> lock(m_SimpleMessageMutex);
+			if (!m_SimpleMessageQueue.empty())
+			{
+				auto message = m_SimpleMessageQueue.front();
+				m_SimpleMessageQueue.pop();
+				lock.unlock();
+				
+				if (message.size() > SIMPLE_MESSAGE_HEADER_SIZE)
+				{
+					return message.substr(SIMPLE_MESSAGE_HEADER_SIZE);
+				}
+			}
+			lock.unlock();
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+		
+		return ""; // timeout
 	}
 
 	void Stream::Close ()
