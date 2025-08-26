@@ -1,6 +1,21 @@
 find_package(Boost REQUIRED COMPONENTS system filesystem program_options)
 
-add_executable(embedded_stream_itest embedded_stream_itest.cpp)
+set(HEADERS
+        StreamInterface.h
+        I2PdUtils.h
+        CliParser.h
+        NormalStreamingImpl.h
+        SimpleStreamingImpl.h
+)
+set(SOURCES
+        I2PdUtils.cpp
+        CliParser.cpp
+        StreamFactory.cpp
+        NormalStreamingImpl.cpp
+        SimpleStreamingImpl.cpp
+)
+
+add_executable(embedded_stream_itest embedded_stream_itest.cpp ${SOURCES} ${HEADERS})
 target_include_directories(embedded_stream_itest PRIVATE
         ${CMAKE_SOURCE_DIR}/libi2pd_client
         ${CMAKE_SOURCE_DIR}/libi2pd
