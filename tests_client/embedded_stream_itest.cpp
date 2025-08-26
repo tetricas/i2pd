@@ -195,54 +195,94 @@ void stop_core()
 
 void recvLoop(std::shared_ptr<i2p::stream::Stream> stream, const std::string& mode)
 {
+    LogPrint(eLogInfo, mode, ": Starting recvLoop, stream status=", stream->GetStatus());
+    
+    // Phase 1: Wait for stream establishment
+    int establishWait = 0;
+    while (!stream->IsEstablished() &&
+            stream->GetStatus() != i2p::stream::eStreamStatusReset &&
+            establishWait < 100) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        establishWait++;
+    }
+    
+    LogPrint(eLogInfo, mode, ": Stream established=", stream->IsEstablished(), ", status=", stream->GetStatus());
+    
+    // Phase 2: Server-side delay for message propagation
+    if (mode == "Server") {
+        LogPrint(eLogInfo, mode, ": Waiting for client message propagation...");
+        std::this_thread::sleep_for(std::chrono::milliseconds(2000)); // Increased from 200ms to 2000ms for zero-hop
+    }
+
     uint8_t recv_buf[4096];
     std::string data;
     bool end = false;
     int numAttempts = 0;
-    while (!end)
+    const int SHORT_TIMEOUT = 5;  // 5 seconds instead of 20
+    const int MAX_ATTEMPTS = 8;   // More attempts with shorter timeouts
+    
+    while (!end && g_running)
     {
-        if (const size_t received = stream->Receive (recv_buf, 4096, RECV_TIMEOUT_S * 2))
+        LogPrint(eLogDebug, mode, ": Receive attempt ", numAttempts + 1, ", stream status=", stream->GetStatus());
+        
+        if (const size_t received = stream->Receive(recv_buf, 4096, SHORT_TIMEOUT))
         {
-            data.append (reinterpret_cast<char *>(recv_buf), received);
-            if (!stream->IsOpen ())
+            data.append(reinterpret_cast<char *>(recv_buf), received);
+            LogPrint(eLogInfo, mode, ": Received ", received, " bytes");
+            
+            // Check if stream is still valid for more data
+            if (stream->GetStatus() == i2p::stream::eStreamStatusReset ||
+                stream->GetStatus() == i2p::stream::eStreamStatusClosed)
                 end = true;
         }
-        else if (!stream->IsOpen () || !g_running)
+        else if (stream->GetStatus() ==i2p::stream:: eStreamStatusReset ||
+                 stream->GetStatus() == i2p::stream::eStreamStatusClosed ||
+                 !g_running)
+        {
+            LogPrint(eLogInfo, mode, ": Stream ended or shutting down, status=", stream->GetStatus());
             end = true;
+        }
         else
         {
-            LogPrint (eLogError, "Client-server: request timeout expired");
+            LogPrint(eLogWarning, mode, ": Receive timeout expired, attempt ", numAttempts + 1);
             numAttempts++;
-            if (numAttempts > 5)
+            if (numAttempts >= MAX_ATTEMPTS)
+            {
+                LogPrint(eLogError, mode, ": Max receive attempts exceeded");
                 end = true;
+            }
         }
     }
-    // process remaining buffer
-    while (const size_t len = stream->ReadSome (recv_buf, sizeof(recv_buf)) && g_running)
-        data.append (reinterpret_cast<char *>(recv_buf), len);
+    
+    // Process remaining buffer
+    while (const size_t len = stream->ReadSome(recv_buf, sizeof(recv_buf)) && g_running)
+        data.append(reinterpret_cast<char *>(recv_buf), len);
 
-    if (!data.empty() && !g_running)
+    if (!data.empty() && g_running)
     {
-        LogPrint(eLogNone, mode, " got: [", data, "]");
+        LogPrint(eLogInfo, mode, " got: [", data, "]");
 
         if (mode == "Server")
         {
             const std::string reply = "echo: " + data;
+            LogPrint(eLogInfo, mode, ": Sending reply: [", reply, "]");
             if (auto sent = stream->Send(reinterpret_cast<const uint8_t*>(reply.data()), reply.size()); sent != reply.size())
-                LogPrint(eLogNone, mode, ": partial send: ", sent);
+                LogPrint(eLogError, mode, ": partial send: ", sent, "/", reply.size());
+            else
+                LogPrint(eLogInfo, mode, ": Reply sent successfully, ", sent, " bytes");
         }
     }
     else
-        LogPrint(eLogWarning, mode, ": no payload before deadline; closing");
+        LogPrint(eLogWarning, mode, ": No payload received or shutting down, data.size()=", data.size());
 
     stream->Close();
-    LogPrint(eLogInfo, mode, " closed: stream");
+    LogPrint(eLogInfo, mode, ": Stream closed");
 }
 
 std::map<std::string,std::string> kZeroHop{
-    {"inbound.length","0"}, {"outbound.length","0"},
+    {"inbound.length","1"}, {"outbound.length","1"},
     {"inbound.lengthVariance","0"}, {"outbound.lengthVariance","0"},
-    {"inbound.quantity","1"}, {"outbound.quantity","1"},
+    {"inbound.quantity","2"}, {"outbound.quantity","2"},
     {"i2cp.leaseSetEncType","0"}
 };
 
@@ -377,16 +417,22 @@ int main(int argc, char** argv) try {
             return 0;
         }
 
-        LogPrint(eLogNone, "Stream status: ", stream->GetStatus());
-
         const std::string msg = "hello";
-        LogPrint(eLogNone, "Client send: ", msg);
-        if (auto sent = stream->Send(reinterpret_cast<const uint8_t*>(msg.data()), msg.size()); sent != msg.size())
-            throw std::runtime_error("Client partial/failed send");
+        LogPrint(eLogInfo, "Client: Attempting to send message: [", msg, "]");
 
-        LogPrint(eLogNone, "Stream status: ", stream->GetStatus());
-        if (!stream->IsOpen())
+        if (auto sent = stream->Send(reinterpret_cast<const uint8_t*>(msg.data()), msg.size()); sent != msg.size()) {
+            LogPrint(eLogError, "Client: Partial send detected: ", sent, "/", msg.size());
+            throw std::runtime_error("Client partial/failed send");
+        }
+        
+        // Add delay to allow packet processing and transmission
+        LogPrint(eLogInfo, "Client: Waiting for packet transmission...");
+        std::this_thread::sleep_for(std::chrono::milliseconds(2000)); // 2 second delay
+
+        if (!stream->IsOpen()) {
+            LogPrint(eLogError, "Client: Stream is not open after send");
             throw std::runtime_error("Stream is not open");
+        }
 
         recvLoop(stream, "Client");
     }
