@@ -49,6 +49,7 @@ namespace stream
 	const uint16_t PACKET_FLAG_ECHO = 0x0200;
 	const uint16_t PACKET_FLAG_NO_ACK = 0x0400;
 	const uint16_t PACKET_FLAG_OFFLINE_SIGNATURE = 0x0800;
+	const uint16_t PACKET_FLAG_SIMPLE_MESSAGE = 0x1000;
 
 	const size_t STREAMING_MTU = 1730;
 	const size_t STREAMING_MTU_RATCHETS = 1812;
@@ -119,6 +120,7 @@ namespace stream
 		bool IsSYN () const { return GetFlags () & PACKET_FLAG_SYNCHRONIZE; };
 		bool IsNoAck () const { return GetFlags () & PACKET_FLAG_NO_ACK; };
 		bool IsEcho () const { return GetFlags () & PACKET_FLAG_ECHO; };
+		bool IsSimpleMessage () const { return GetFlags () & PACKET_FLAG_SIMPLE_MESSAGE; };
 	};
 
 	struct PacketCmp
@@ -211,13 +213,13 @@ namespace stream
 			void HandlePing (Packet * packet);
 			size_t Send (const uint8_t * buf, size_t len);
 			void AsyncSend (const uint8_t * buf, size_t len, SendHandler handler);
-			void SendPing (std::string data = "");
+			void SendPing ();
+			void SendSimpleMessage (const uint8_t * buf, size_t len);
+			void HandleSimpleMessage (Packet * packet);
 			
 			// Simplified send-receive methods
-			size_t SimpleSend (const uint8_t * buf, size_t len, int timeout_ms = 5000);
-			size_t SimpleReceive (uint8_t * buf, size_t len, int timeout_ms = 10000);
-			void SendEcho (const std::string& data, bool expectResponse = false);
-			std::string ReceiveEcho (int timeout_ms = 10000);
+			void SimpleSend (const std::string& data, bool expectResponse = false);
+			std::string SimpleReceive (int timeout_ms = 10000);
 
 			template<typename Buffer, typename ReceiveHandler>
 			void AsyncReceive (const Buffer& buffer, ReceiveHandler handler, int timeout = 0);
@@ -341,6 +343,7 @@ namespace stream
 		public:
 
 			typedef std::function<void (std::shared_ptr<Stream>)> Acceptor;
+			typedef std::function<std::string (const std::string&, const i2p::data::IdentHash&)> SimpleMessageHandler;
 
 			StreamingDestination (std::shared_ptr<i2p::client::ClientDestination> owner, uint16_t localPort = 0, bool gzip = false);
 			~StreamingDestination ();
@@ -359,6 +362,11 @@ namespace stream
 			void AcceptOnce (const Acceptor& acceptor);
 			void AcceptOnceAcceptor (std::shared_ptr<Stream> stream, Acceptor acceptor, Acceptor prev);
 			std::shared_ptr<Stream> AcceptStream (int timeout = 0); // sync
+			
+			void SetSimpleMessageHandler (const SimpleMessageHandler& handler);
+			void ResetSimpleMessageHandler ();
+			bool IsSimpleMessageHandlerSet () const { return m_SimpleMessageHandler != nullptr; };
+			std::string CallSimpleMessageHandler (const std::string& message, const i2p::data::IdentHash& clientHash) const;
 
 			std::shared_ptr<i2p::client::ClientDestination> GetOwner () const { return m_Owner; };
 			void SetOwner (std::shared_ptr<i2p::client::ClientDestination> owner) { m_Owner = owner; };
@@ -387,6 +395,7 @@ namespace stream
 			std::unordered_map<uint32_t, std::shared_ptr<Stream> > m_IncomingStreams; // receiveStreamID->stream
 			std::shared_ptr<Stream> m_LastStream;
 			Acceptor m_Acceptor;
+			SimpleMessageHandler m_SimpleMessageHandler;
 			std::list<std::shared_ptr<Stream> > m_PendingIncomingStreams;
 			boost::asio::deadline_timer m_PendingIncomingTimer;
 			std::unordered_map<uint32_t, std::list<Packet *> > m_SavedPackets; // receiveStreamID->packets, arrived before SYN

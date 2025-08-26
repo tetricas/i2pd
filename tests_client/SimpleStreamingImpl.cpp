@@ -60,35 +60,25 @@ std::string SimpleStreamClient::sendMessage(const std::string& serverB32,
         
         LogPrint(eLogInfo, "SimpleClient: Stream established: ", stream->IsEstablished());
         LogPrint(eLogInfo, "SimpleClient: Stream status: ", stream->GetStatus());
-        LogPrint(eLogInfo, "SimpleClient: Sending message: [", message, "]");
+        LogPrint(eLogInfo, "SimpleClient: Sending message via SendEcho: [", message, "]");
         
-        // Use SimpleSend for reliable delivery (this sends as ping with echo request)
-        size_t sent = stream->SimpleSend(reinterpret_cast<const uint8_t*>(message.data()), 
-                                        message.size(), timeout_ms / 2);
-        if (sent != message.size())
+        // Use SendEcho for reliable request-response (this uses ping protocol)
+        stream->SimpleSend(message, true); // true = expect response
+        
+        LogPrint(eLogInfo, "SimpleClient: SendEcho sent, waiting for response...");
+        
+        // Use ReceiveEcho to get the response
+        std::string response = stream->SimpleReceive(timeout_ms / 2);
+        
+        if (!response.empty())
         {
-            m_lastStatus = "SimpleSend failed: " + std::to_string(sent) + "/" + std::to_string(message.size());
-            LogPrint(eLogError, "SimpleClient: SimpleSend failed, sent=", sent, ", expected=", message.size());
-            return "";
-        }
-        
-        LogPrint(eLogInfo, "SimpleClient: SimpleSend success, sent=", sent, " bytes");
-        
-        // Use SimpleReceive for response
-        uint8_t recvBuf[4096];
-        size_t received = stream->SimpleReceive(recvBuf, sizeof(recvBuf), timeout_ms / 2);
-        
-        std::string response;
-        if (received > 0)
-        {
-            response = std::string(reinterpret_cast<char*>(recvBuf), received);
-            LogPrint(eLogInfo, "SimpleClient: SimpleReceive success, got: [", response, "]");
+            LogPrint(eLogInfo, "SimpleClient: ReceiveEcho success, got: [", response, "]");
             m_lastStatus = "Message exchange successful";
         }
         else
         {
-            m_lastStatus = "SimpleReceive timeout or failed";
-            LogPrint(eLogWarning, "SimpleClient: SimpleReceive timeout or failed");
+            m_lastStatus = "ReceiveEcho timeout or failed";
+            LogPrint(eLogWarning, "SimpleClient: ReceiveEcho timeout or failed");
         }
         
         return response;
@@ -154,18 +144,18 @@ void SimpleStreamServer::start(const MessageHandler handler)
     
     LogPrint(eLogInfo, "SimpleServer: Server ready, b32: ", getB32Address());
     
-    // Accept incoming streams - this creates the stream that HandlePing will use
+    // Accept streams to handle incoming ping-based echo requests
     m_destination->AcceptStreams([this](std::shared_ptr<stream::Stream> stream) {
         if (m_running.load())
         {
-            LogPrint(eLogInfo, "SimpleServer: Got incoming stream, status=", stream->GetStatus());
+            LogPrint(eLogInfo, "SimpleServer: Got incoming stream for echo handling");
             
-            // Keep the stream alive for SimpleSend/SimpleReceive communication
-            // The stream's HandlePing method will automatically handle SimpleSend messages
+            // Keep the stream alive and monitor for custom handling
             std::thread([this, stream = std::move(stream)]() {
                 try {
-                    // Just keep the stream alive - HandlePing will process SimpleSend messages
                     while (m_running.load() && stream->GetStatus() != stream::eStreamStatusClosed) {
+                        // The stream's HandlePing automatically processes echo requests
+                        // but we can also monitor SimpleReceive for custom handling
                         std::this_thread::sleep_for(1000ms);
                     }
                     LogPrint(eLogInfo, "SimpleServer: Stream closed");
@@ -223,32 +213,23 @@ void SimpleStreamServer::handleIncomingStream(std::shared_ptr<stream::Stream> st
         LogPrint(eLogInfo, "SimpleServer: Handling stream, status=", stream->GetStatus());
         
         // Use SimpleReceive to wait for client message
-        uint8_t recvBuf[4096];
         LogPrint(eLogInfo, "SimpleServer: Waiting for simple message...");
-        
-        size_t received = stream->SimpleReceive(recvBuf, sizeof(recvBuf), 15000);
-        
-        if (received > 0 && m_running.load())
+
+        if (auto received = stream->SimpleReceive(15000); !received.empty() && m_running.load())
         {
-            std::string clientMsg(reinterpret_cast<char*>(recvBuf), received);
-            LogPrint(eLogInfo, "SimpleServer: SimpleReceive success, got: [", clientMsg, "]");
+            LogPrint(eLogInfo, "SimpleServer: SimpleReceive success, got: [", received, "]");
             
             // Call handler to get response
             std::string response;
             if (m_handler)
-                response = m_handler(clientMsg);
+                response = m_handler(received);
             else
-                response = "echo: " + clientMsg;  // Default echo
+                response = "echo: " + received;  // Default echo
             
             LogPrint(eLogInfo, "SimpleServer: Sending response: [", response, "]");
             
             // Send response back to client using SimpleSend
-            size_t sent = stream->SimpleSend(reinterpret_cast<const uint8_t*>(response.data()), 
-                                           response.size(), 5000);
-            if (sent != response.size())
-                LogPrint(eLogError, "SimpleServer: SimpleSend failed, sent=", sent, ", expected=", response.size());
-            else
-                LogPrint(eLogInfo, "SimpleServer: SimpleSend success, sent=", sent, " bytes");
+            stream->SimpleSend(response);
         }
         else
             LogPrint(eLogWarning, "SimpleServer: SimpleReceive timeout or failed, received=", received);

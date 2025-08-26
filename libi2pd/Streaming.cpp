@@ -15,6 +15,7 @@
 #include "Destination.h"
 #include "Streaming.h"
 #include <chrono>
+#include <ranges>
 #include <thread>
 
 namespace i2p
@@ -602,55 +603,7 @@ namespace stream
 		if (ProcessOptions (flags, packet) && m_RemoteIdentity)
 		{
 			auto payloadLen = int(packet->len) - (packet->GetPayload () - packet->buf);
-			bool isSimpleMessage = false;
-			
-			// Check if this is a simple message (has our header format)
-			if (payloadLen >= SIMPLE_MESSAGE_HEADER_SIZE)
-			{
-				const uint8_t* payload = packet->GetPayload();
-				uint8_t msgType = payload[0];
-				
-				// Check if it's one of our simple message types
-				if (msgType == SIMPLE_MESSAGE_ECHO_REQUEST || 
-					msgType == SIMPLE_MESSAGE_ECHO_RESPONSE || 
-					msgType == SIMPLE_MESSAGE_DATA_ONLY)
-				{
-					isSimpleMessage = true;
-					uint16_t seqNum = bufbe16toh(payload + 1);
-					uint16_t dataLen = bufbe16toh(payload + 3);
-					
-					// Validate message format
-					if (SIMPLE_MESSAGE_HEADER_SIZE + dataLen == payloadLen)
-					{
-						// Extract the full message and add to queue
-						std::string message(reinterpret_cast<const char*>(payload), payloadLen);
-						
-						{
-							std::unique_lock<std::mutex> lock(m_SimpleMessageMutex);
-							m_SimpleMessageQueue.push(message);
-						}
-						
-						LogPrint (eLogDebug, "Streaming: Simple message received, type=", (int)msgType, 
-							", seq=", seqNum, ", dataLen=", dataLen);
-						
-						// Send response if requested
-						if (msgType == SIMPLE_MESSAGE_ECHO_REQUEST && dataLen > 0)
-						{
-							std::string responseData(reinterpret_cast<const char*>(payload + SIMPLE_MESSAGE_HEADER_SIZE), dataLen);
-							SendEcho(responseData, false); // Send as data only (response)
-						}
-					}
-					else
-					{
-						LogPrint (eLogWarning, "Streaming: Invalid simple message format, expected len=", 
-							SIMPLE_MESSAGE_HEADER_SIZE + dataLen, ", actual=", payloadLen);
-						isSimpleMessage = false;
-					}
-				}
-			}
-			
-			// If not a simple message, handle as regular ping/pong
-			if (!isSimpleMessage)
+			// Handle as regular ping/pong
 			{
 				// send pong
 				Packet p;
@@ -664,11 +617,6 @@ namespace stream
 				p.len = payloadLen + 22;
 				SendPackets (std::vector<Packet *> { &p });
 				LogPrint (eLogDebug, "Streaming: Pong of ", p.len, " bytes sent");
-				if (payloadLen > 0)
-				{
-					std::string payload (p.GetPayload (), p.GetPayload () + payloadLen);
-					LogPrint (eLogDebug, "Streaming: Pong payload: ", payload);
-				}
 			}
 		}
 		m_LocalDestination.DeletePacket (packet);
@@ -1229,7 +1177,7 @@ namespace stream
 		LogPrint (eLogDebug, "Streaming: Quick Ack sent. ", (int)numNacks, " NACKs");
 	}
 
-	void Stream::SendPing (std::string data)
+	void Stream::SendPing ()
 	{
 		Packet p;
 		uint8_t * packet = p.GetBuffer ();
@@ -1259,106 +1207,183 @@ namespace stream
 		memset (signature, 0, signatureLen); // zeroes for now
 		size += signatureLen; // signature
 		htobe16buf (optionsSize, packet + size - 2 - optionsSize); // actual options size
-		if (!data.empty ())
-		{
-			memcpy (const_cast<uint8_t*>(p.GetPayload()), data.c_str(), data.size ());
-			size += data.size ();
-		}
 		m_LocalDestination.GetOwner ()->Sign (packet, size, signature);
 		p.len = size;
 		SendPackets (std::vector<Packet *> { &p });
 		LogPrint (eLogDebug, "Streaming: Ping of ", p.len, " bytes sent");
 	}
 
-	// Simplified send-receive methods implementation
-	size_t Stream::SimpleSend (const uint8_t * buf, size_t len, int timeout_ms)
+	void Stream::HandleSimpleMessage (Packet * packet)
 	{
-		if (!buf || !len || len > MAX_PACKET_SIZE - SIMPLE_MESSAGE_HEADER_SIZE)
-			return 0;
-			
-		// Create message with header: type(1) + seq(2) + len(2) + data
-		std::string message;
-		message.resize(SIMPLE_MESSAGE_HEADER_SIZE + len);
-		
-		message[0] = SIMPLE_MESSAGE_DATA_ONLY; // message type
-		htobe16buf(reinterpret_cast<uint8_t*>(&message[1]), ++m_SimpleSeqNumber); // sequence
-		htobe16buf(reinterpret_cast<uint8_t*>(&message[3]), len); // data length
-		memcpy(&message[SIMPLE_MESSAGE_HEADER_SIZE], buf, len); // data
-		
-		SendPing(message); // Use existing ping mechanism
-		return len;
-	}
-	
-	size_t Stream::SimpleReceive (uint8_t * buf, size_t len, int timeout_ms)
-	{
-		if (!buf || !len)
-			return 0;
-			
-		auto start_time = std::chrono::steady_clock::now();
-		
-		while (std::chrono::duration_cast<std::chrono::milliseconds>(
-			std::chrono::steady_clock::now() - start_time).count() < timeout_ms)
+		uint16_t flags = packet->GetFlags ();
+		if (ProcessOptions (flags, packet) && m_RemoteIdentity)
 		{
-			std::unique_lock<std::mutex> lock(m_SimpleMessageMutex);
-			if (!m_SimpleMessageQueue.empty())
+			auto payloadLen = int(packet->len) - (packet->GetPayload () - packet->buf);
+			std::string payl (packet->GetPayload (), packet->GetPayload () + payloadLen);
+			LogPrint (eLogInfo, "HandleSimpleMessage: Payload ", payl);
+			
+			// Check if this is a simple message (has our header format)
+			if (payloadLen < SIMPLE_MESSAGE_HEADER_SIZE)
 			{
-				auto message = m_SimpleMessageQueue.front();
-				m_SimpleMessageQueue.pop();
-				lock.unlock();
-				
-				// Extract data from message (skip header)
-				if (message.size() > SIMPLE_MESSAGE_HEADER_SIZE)
+				LogPrint (eLogWarning, "Streaming: PayloadLen is smaller that header size: ",
+							SIMPLE_MESSAGE_HEADER_SIZE, ", actual=", payloadLen);
+				m_LocalDestination.DeletePacket (packet);
+				return;
+			}
+			const uint8_t* payload = packet->GetPayload();
+			uint8_t msgType = payload[0];
+
+			// Check if it's one of our simple message types
+			if (msgType == SIMPLE_MESSAGE_ECHO_REQUEST ||
+				msgType == SIMPLE_MESSAGE_ECHO_RESPONSE ||
+				msgType == SIMPLE_MESSAGE_DATA_ONLY)
+			{
+				uint16_t seqNum = bufbe16toh(payload + 1);
+				uint16_t dataLen = bufbe16toh(payload + 3);
+
+				// Validate message format
+				if (SIMPLE_MESSAGE_HEADER_SIZE + dataLen != payloadLen)
 				{
-					size_t data_len = std::min(len, message.size() - SIMPLE_MESSAGE_HEADER_SIZE);
-					memcpy(buf, message.data() + SIMPLE_MESSAGE_HEADER_SIZE, data_len);
-					return data_len;
+					LogPrint (eLogWarning, "Streaming: Invalid simple message format, expected len=",
+								SIMPLE_MESSAGE_HEADER_SIZE + dataLen, ", actual=", payloadLen);
+					m_LocalDestination.DeletePacket (packet);
+					return;
+				}
+
+				// Extract the full message and add to queue
+				std::string message(reinterpret_cast<const char*>(payload), payloadLen);
+
+				{
+					std::unique_lock lock(m_SimpleMessageMutex);
+					m_SimpleMessageQueue.push(message);
+				}
+
+				LogPrint (eLogInfo, "Streaming: Simple message received, type=", (int)msgType,
+					", seq=", seqNum, ", dataLen=", dataLen);
+
+				// Send response if requested (echo request)
+				if (msgType == SIMPLE_MESSAGE_ECHO_REQUEST && dataLen > 0)
+				{
+					std::string requestData(reinterpret_cast<const char*>(payload + SIMPLE_MESSAGE_HEADER_SIZE), dataLen);
+					std::string responseData;
+
+					// Check if there's a custom handler
+					bool hasHandler = m_LocalDestination.IsSimpleMessageHandlerSet();
+					LogPrint(eLogInfo, "Streaming: Checking for custom handler, hasHandler=", hasHandler);
+					if (hasHandler)
+					{
+						// Call custom handler
+						if (m_RemoteIdentity) {
+							responseData = m_LocalDestination.CallSimpleMessageHandler(requestData, m_RemoteIdentity->GetIdentHash());
+							LogPrint (eLogInfo, "Streaming: Custom simple message handler called, response len=", responseData.size());
+						} else {
+							LogPrint (eLogError, "Streaming: Remote identity not available for simple message handler");
+							responseData = "error: remote identity not available";
+						}
+					}
+					else
+					{
+						// Default echo behavior
+						responseData = "echo: " + requestData;
+						LogPrint (eLogInfo, "Streaming: Using default echo behavior");
+					}
+
+					// Create echo response message
+					std::vector<uint8_t> response(SIMPLE_MESSAGE_HEADER_SIZE + responseData.size());
+					response[0] = SIMPLE_MESSAGE_ECHO_RESPONSE;
+					htobe16buf(&response[1], seqNum); // same sequence number
+					htobe16buf(&response[3], responseData.size());
+					memcpy(&response[SIMPLE_MESSAGE_HEADER_SIZE], responseData.data(), responseData.size());
+
+					// Send response back via simple message
+					SendSimpleMessage(response.data(), response.size());
+					LogPrint (eLogInfo, "Streaming: Simple message response sent, dataLen=", responseData.size());
 				}
 			}
-			lock.unlock();
-			std::this_thread::sleep_for(std::chrono::milliseconds(10));
 		}
-		
-		return 0; // timeout
+		m_LocalDestination.DeletePacket (packet);
+	}
+
+	void Stream::SendSimpleMessage (const uint8_t * buf, size_t len)
+	{
+		LogPrint (eLogInfo, "Streaming: SendSimpleMessage sSID=", m_SendStreamID, " rSID=", m_RecvStreamID);
+		Packet p;
+		uint8_t * packet = p.GetBuffer ();
+		size_t size = 0;
+		htobe32buf (packet, m_SendStreamID);
+		size += 4; // sendStreamID
+		htobe32buf (packet, m_RecvStreamID);
+		size += 4; // recvStreamID
+		memset (packet + size, 0, 10);
+		size += 10; // all zeroes
+		uint16_t flags = PACKET_FLAG_SIMPLE_MESSAGE | PACKET_FLAG_SIGNATURE_INCLUDED | PACKET_FLAG_FROM_INCLUDED;
+		bool isOfflineSignature = m_LocalDestination.GetOwner ()->GetPrivateKeys ().IsOfflineSignature ();
+		if (isOfflineSignature) flags |= PACKET_FLAG_OFFLINE_SIGNATURE;
+		htobe16buf (packet + size, flags);
+		size += 2; // flags
+		size_t identityLen = m_LocalDestination.GetOwner ()->GetIdentity ()->GetFullLen ();
+		size_t signatureLen = m_LocalDestination.GetOwner ()->GetPrivateKeys ().GetSignatureLen ();
+		uint8_t * optionsSize = packet + size; // set options size later
+		size += 2; // options size
+		m_LocalDestination.GetOwner ()->GetIdentity ()->ToBuffer (packet + size, identityLen);
+		size += identityLen; // from
+		if (isOfflineSignature)
+		{
+			const auto& offlineSignature = m_LocalDestination.GetOwner ()->GetPrivateKeys ().GetOfflineSignature ();
+			memcpy (packet + size, offlineSignature.data (), offlineSignature.size ());
+			size += offlineSignature.size (); // offline signature
+		}
+		uint8_t * signature = packet + size; // set it later
+		memset (signature, 0, signatureLen); // zeroes for now
+		size += signatureLen; // signature
+		htobe16buf (optionsSize, packet + size - 2 - optionsSize); // actual options size
+		if (buf && len > 0)
+		{
+			memcpy (const_cast<uint8_t*>(p.GetPayload()), buf, len);
+			size += len;
+		}
+		m_LocalDestination.GetOwner ()->Sign (packet, size, signature);
+		p.len = size;
+		SendPackets (std::vector{ &p });
+		LogPrint (eLogDebug, "Streaming: Simple message of ", p.len, " bytes sent");
 	}
 	
-	void Stream::SendEcho (const std::string& data, bool expectResponse)
+	void Stream::SimpleSend (const std::string& data, bool expectResponse)
 	{
 		if (data.size() > MAX_PACKET_SIZE - SIMPLE_MESSAGE_HEADER_SIZE)
 			return;
 			
-		std::string message;
-		message.resize(SIMPLE_MESSAGE_HEADER_SIZE + data.size());
+		std::vector<uint8_t> message(SIMPLE_MESSAGE_HEADER_SIZE + data.size());
 		
 		uint8_t msg_type = expectResponse ? SIMPLE_MESSAGE_ECHO_REQUEST : SIMPLE_MESSAGE_DATA_ONLY;
 		message[0] = msg_type;
-		htobe16buf(reinterpret_cast<uint8_t*>(&message[1]), ++m_SimpleSeqNumber);
-		htobe16buf(reinterpret_cast<uint8_t*>(&message[3]), data.size());
+		htobe16buf(&message[1], ++m_SimpleSeqNumber);
+		htobe16buf(&message[3], data.size());
 		memcpy(&message[SIMPLE_MESSAGE_HEADER_SIZE], data.data(), data.size());
 		
-		SendPing(message);
-		LogPrint (eLogDebug, "Streaming: Echo sent, type=", (int)msg_type, ", len=", data.size());
+		SendSimpleMessage(message.data(), message.size());
+		LogPrint (eLogDebug, "Streaming: SimpleSend, type=", (int)msg_type, ", len=", data.size());
 	}
 	
-	std::string Stream::ReceiveEcho (int timeout_ms)
+	std::string Stream::SimpleReceive (int timeout_ms)
 	{
 		auto start_time = std::chrono::steady_clock::now();
 		
 		while (std::chrono::duration_cast<std::chrono::milliseconds>(
 			std::chrono::steady_clock::now() - start_time).count() < timeout_ms)
 		{
-			std::unique_lock<std::mutex> lock(m_SimpleMessageMutex);
-			if (!m_SimpleMessageQueue.empty())
+			std::string message;
 			{
-				auto message = m_SimpleMessageQueue.front();
-				m_SimpleMessageQueue.pop();
-				lock.unlock();
-				
-				if (message.size() > SIMPLE_MESSAGE_HEADER_SIZE)
+				std::unique_lock lock(m_SimpleMessageMutex);
+				if (!m_SimpleMessageQueue.empty())
 				{
-					return message.substr(SIMPLE_MESSAGE_HEADER_SIZE);
+					message = m_SimpleMessageQueue.front();
+					m_SimpleMessageQueue.pop();
 				}
 			}
-			lock.unlock();
+			if (message.size() > SIMPLE_MESSAGE_HEADER_SIZE)
+				return message.substr(SIMPLE_MESSAGE_HEADER_SIZE);
+
 			std::this_thread::sleep_for(std::chrono::milliseconds(10));
 		}
 		
@@ -2099,8 +2124,35 @@ namespace stream
 	void StreamingDestination::HandleNextPacket (Packet * packet)
 	{
 		uint32_t sendStreamID = packet->GetSendStreamID ();
+		uint32_t recvStreamID = packet->GetReceiveStreamID();
+		LogPrint (eLogInfo, "Streaming: HandleNextPacket sSID=", sendStreamID, " rSID=", recvStreamID,
+			" StreamingDestination=", this);
 		if (sendStreamID)
 		{
+			if (packet->IsSimpleMessage ()) {
+				// simple message
+				LogPrint (eLogInfo, "Streaming: IsSimpleMessage");
+				const auto payloadLen = static_cast<int>(packet->len) - (packet->GetPayload () - packet->buf);
+				if (payloadLen > 0)
+				{
+					std::string payload (packet->GetPayload (), packet->GetPayload () + payloadLen);
+					LogPrint (eLogInfo, "Streaming: Simple message payload: ", payload);
+				}
+				if (const auto it = m_Streams.find (sendStreamID); it != m_Streams.end ())
+					m_LastStream = it->second;
+				else
+				{
+					m_LastStream = std::make_shared<Stream> (m_Owner->GetService (), *this);
+					std::string streams;
+					for (const auto id: m_Streams | std::views::keys) {
+						streams += std::to_string(id) + ", ";
+					}
+					LogPrint (eLogInfo, "Streaming: Can't find stream in ", streams);
+				}
+
+				m_LastStream->HandleSimpleMessage (packet);
+				return;
+			}
 			if (!m_LastStream || sendStreamID != m_LastStream->GetRecvStreamID ())
 			{
 				auto it = m_Streams.find (sendStreamID);
@@ -2116,11 +2168,6 @@ namespace stream
 				// ping
 				LogPrint (eLogInfo, "Streaming: Ping received sSID=", sendStreamID);
 				auto payloadLen = int(packet->len) - (packet->GetPayload () - packet->buf);
-				if (payloadLen > 0)
-				{
-					std::string payload (packet->GetPayload (), packet->GetPayload () + payloadLen);
-					LogPrint (eLogInfo, "Streaming: Ping payload: ", payload);
-				}
 				auto s = std::make_shared<Stream> (m_Owner->GetService (), *this);
 				s->HandlePing (packet);
 			}
@@ -2313,6 +2360,26 @@ namespace stream
 	{
 		if (m_Acceptor) m_Acceptor (nullptr);
 		m_Acceptor = nullptr;
+	}
+	
+	void StreamingDestination::SetSimpleMessageHandler (const SimpleMessageHandler& handler)
+	{
+		m_SimpleMessageHandler = handler;
+		LogPrint(eLogInfo, "Streaming: SimpleMessageHandler set, handler is ", (handler ? "valid" : "null"), 
+				 ", stored handler is ", (m_SimpleMessageHandler ? "valid" : "null"));
+	}
+	
+	void StreamingDestination::ResetSimpleMessageHandler ()
+	{
+		m_SimpleMessageHandler = nullptr;
+	}
+	
+	std::string StreamingDestination::CallSimpleMessageHandler (const std::string& message, const i2p::data::IdentHash& clientHash) const
+	{
+		if (m_SimpleMessageHandler) {
+			return m_SimpleMessageHandler(message, clientHash);
+		}
+		return ""; // Return empty string if no handler
 	}
 
 	void StreamingDestination::AcceptOnce (const Acceptor& acceptor)
