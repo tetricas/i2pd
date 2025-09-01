@@ -4,6 +4,7 @@
 #include <string>
 #include <functional>
 #include "Streaming.h"
+#include "Identity.h"
 
 
 namespace i2p::embed
@@ -52,7 +53,7 @@ public:
      * @param clientMessage Message received from client
      * @return Response to send back to client
      */
-    using MessageHandler = std::function<std::string(const std::string& clientMessage)>;
+    using MessageHandler = std::function<std::string(const std::string& clientMessage, const i2p::data::IdentHash& clientHash)>;
     
     /**
      * @brief Start server and begin accepting connections

@@ -68,20 +68,22 @@ std::string SimpleStreamClient::sendMessage(const std::string& serverB32,
         LogPrint(eLogInfo, "SimpleClient: SendEcho sent, waiting for response...");
         
         // Use ReceiveEcho to get the response
+        LogPrint(eLogInfo, "SimpleClient: Calling SimpleReceive with timeout ", timeout_ms / 2, "ms");
         std::string response = stream->SimpleReceive(timeout_ms / 2);
+        LogPrint(eLogInfo, "SimpleClient: SimpleReceive returned: [", response, "], size=", response.size());
         
         if (!response.empty())
         {
             LogPrint(eLogInfo, "SimpleClient: ReceiveEcho success, got: [", response, "]");
             m_lastStatus = "Message exchange successful";
+            return response;
         }
         else
         {
             m_lastStatus = "ReceiveEcho timeout or failed";
             LogPrint(eLogWarning, "SimpleClient: ReceiveEcho timeout or failed");
+            return "";
         }
-        
-        return response;
         
     }
     catch (const std::exception& e)
@@ -144,29 +146,29 @@ void SimpleStreamServer::start(const MessageHandler handler)
     
     LogPrint(eLogInfo, "SimpleServer: Server ready, b32: ", getB32Address());
     
-    // Accept streams to handle incoming ping-based echo requests
-    m_destination->AcceptStreams([this](std::shared_ptr<stream::Stream> stream) {
-        if (m_running.load())
-        {
-            LogPrint(eLogInfo, "SimpleServer: Got incoming stream for echo handling");
-            
-            // Keep the stream alive and monitor for custom handling
-            std::thread([this, stream = std::move(stream)]() {
-                try {
-                    while (m_running.load() && stream->GetStatus() != stream::eStreamStatusClosed) {
-                        // The stream's HandlePing automatically processes echo requests
-                        // but we can also monitor SimpleReceive for custom handling
-                        std::this_thread::sleep_for(1000ms);
-                    }
-                    LogPrint(eLogInfo, "SimpleServer: Stream closed");
-                } catch (const std::exception& e) {
-                    LogPrint(eLogError, "SimpleServer: Stream thread exception: ", e.what());
-                }
-            }).detach();
+    // Set simple message handler on the streaming destination
+    auto streamingDest = m_destination->GetStreamingDestination();
+    if (!streamingDest) {
+        LogPrint(eLogError, "SimpleServer: Failed to get streaming destination");
+        m_lastStatus = "Failed to get streaming destination";
+        return;
+    }
+    
+    streamingDest->SetSimpleMessageHandler([this](const std::string& message, const i2p::data::IdentHash& clientHash) -> std::string {
+        LogPrint(eLogInfo, "SimpleServer: Simple message handler called with: [", message, "] from client: ", clientHash.ToBase32().substr(0, 8), "...");
+        if (m_handler) {
+            std::string response = m_handler(message, clientHash);
+            LogPrint(eLogInfo, "SimpleServer: Handler returned: [", response, "]");
+            return response;
         }
-    });
 
-    m_lastStatus = "Server started and accepting connections";
+        LogPrint(eLogInfo, "SimpleServer: No handler set, using echo");
+        return "echo: " + message;
+    });
+    
+    LogPrint(eLogInfo, "SimpleServer: Simple message handler installed");
+
+    m_lastStatus = "Server started and accepting simple messages";
 }
 
 void SimpleStreamServer::stop()
@@ -174,7 +176,11 @@ void SimpleStreamServer::stop()
     if (m_running.load())
     {
         m_running.store(false);
-        m_destination->StopAcceptingStreams();
+        
+        // Reset simple message handler
+        if ( m_destination->ResetSimpleMessageHandler())
+            LogPrint(eLogInfo, "SimpleServer: Simple message handler reset");
+        
         m_lastStatus = "Server stopped";
         LogPrint(eLogInfo, "SimpleServer: Server stopped");
     }
@@ -207,41 +213,5 @@ std::string SimpleStreamServer::getStatus() const
     return oss.str();
 }
 
-void SimpleStreamServer::handleIncomingStream(std::shared_ptr<stream::Stream> stream)
-{
-    try {
-        LogPrint(eLogInfo, "SimpleServer: Handling stream, status=", stream->GetStatus());
-        
-        // Use SimpleReceive to wait for client message
-        LogPrint(eLogInfo, "SimpleServer: Waiting for simple message...");
-
-        if (auto received = stream->SimpleReceive(15000); !received.empty() && m_running.load())
-        {
-            LogPrint(eLogInfo, "SimpleServer: SimpleReceive success, got: [", received, "]");
-            
-            // Call handler to get response
-            std::string response;
-            if (m_handler)
-                response = m_handler(received);
-            else
-                response = "echo: " + received;  // Default echo
-            
-            LogPrint(eLogInfo, "SimpleServer: Sending response: [", response, "]");
-            
-            // Send response back to client using SimpleSend
-            stream->SimpleSend(response);
-        }
-        else
-            LogPrint(eLogWarning, "SimpleServer: SimpleReceive timeout or failed, received=", received);
-        
-        // Brief wait before cleanup
-        std::this_thread::sleep_for(1000ms);
-        
-    }
-    catch (const std::exception& e)
-    {
-        LogPrint(eLogError, "SimpleServer: Exception in stream handler: ", e.what());
-    }
-}
 
 } // namespace i2p::embed

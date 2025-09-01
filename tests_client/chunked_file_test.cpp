@@ -1,0 +1,250 @@
+#include <iostream>
+#include <string>
+#include <thread>
+#include <chrono>
+#include <iomanip>
+
+#include "I2PdUtils.h"
+#include "ChunkedFileClient.h"
+#include "ChunkedFileServer.h"
+#include "Config.h"
+#include "FS.h"
+#include "Log.h"
+
+using namespace i2p::filetransfer;
+using namespace std::chrono_literals;
+
+void printUsage(const char* program) {
+    std::cout << "Usage: " << program << " <mode> [options]\n\n";
+    std::cout << "Modes:\n";
+    std::cout << "  server [--conf config.conf] [--datadir path] [--file filename:size]\n";
+    std::cout << "  client [--conf config.conf] [--datadir path] --server-b32 <address> --file <filename>\n\n";
+    std::cout << "Server Options:\n";
+    std::cout << "  --conf <file>       Configuration file path\n";
+    std::cout << "  --datadir <path>    Data directory path\n";
+    std::cout << "  --file <name:size>  Generate mock file (default: test.bin:10240)\n\n";
+    std::cout << "Client Options:\n";
+    std::cout << "  --conf <file>       Configuration file path\n";
+    std::cout << "  --datadir <path>    Data directory path\n";
+    std::cout << "  --server-b32 <addr> Server's base32 address\n";
+    std::cout << "  --file <filename>   File to download (default: test.bin)\n";
+    std::cout << "  --timeout <ms>      Transfer timeout in milliseconds (default: 30000)\n\n";
+    std::cout << "Examples:\n";
+    std::cout << "  # Start server with 10KB test file\n";
+    std::cout << "  " << program << " server --conf srv.conf --datadir /tmp/srv\n\n";
+    std::cout << "  # Start client to download file\n";
+    std::cout << "  " << program << " client --conf cli.conf --datadir /tmp/cli \\\n";
+    std::cout << "    --server-b32 abc123...xyz.b32.i2p --file test.bin\n";
+}
+
+void printTransferStats(const ChunkedFileClient::TransferResult& result) {
+    LogPrint(eLogInfo, "\n=== TRANSFER STATISTICS ===");
+    LogPrint(eLogInfo, "Success: ", (result.success ? "YES" : "NO"));
+    
+    if (!result.success) {
+        LogPrint(eLogError, "Error: ", result.error);
+        return;
+    }
+    
+    const auto& stats = result.stats;
+    
+    LogPrint(eLogInfo, "Initialization Time: ", stats.getInitTime().count(), " ms");
+    LogPrint(eLogInfo, "Request Time: ", stats.getRequestTime().count(), " ms");
+    LogPrint(eLogInfo, "Total Transfer Time: ", stats.getTransferTime().count(), " ms");
+    LogPrint(eLogInfo, "Total Bytes: ", stats.totalBytes, " bytes (", 
+             std::fixed, std::setprecision(2), (stats.totalBytes / 1024.0), " KB)");
+    LogPrint(eLogInfo, "Chunks: ", stats.chunksReceived, "/", stats.chunksTotal);
+    LogPrint(eLogInfo, "Throughput: ", std::fixed, std::setprecision(2), 
+             stats.getThroughputKBps(), " KB/s");
+    LogPrint(eLogInfo, "Average Chunk Time: ", stats.getAverageChunkTime().count(), " ms");
+    LogPrint(eLogInfo, "Data Verified: ", (stats.verified ? "YES" : "NO"));
+    
+    if (!stats.chunkTimes.empty()) {
+        auto minTime = *std::min_element(stats.chunkTimes.begin(), stats.chunkTimes.end());
+        auto maxTime = *std::max_element(stats.chunkTimes.begin(), stats.chunkTimes.end());
+        LogPrint(eLogInfo, "Chunk Time Range: ", minTime.count(), " - ", maxTime.count(), " ms");
+    }
+    
+    LogPrint(eLogInfo, "===========================\n");
+}
+
+int runServer(int argc, char* argv[]) {
+    std::string configPath;
+    std::string dataDir;
+    std::string mockFileName = "test.bin";
+    size_t mockFileSize = 100 * 1024 * 1024; // 100MB default
+    
+    // Parse server arguments
+    for (int i = 2; i < argc; ++i) {
+        std::string arg = argv[i];
+        
+        if (arg == "--conf" && i + 1 < argc) {
+            configPath = argv[++i];
+        } else if (arg == "--datadir" && i + 1 < argc) {
+            dataDir = argv[++i];
+        } else if (arg == "--file" && i + 1 < argc) {
+            std::string fileSpec = argv[++i];
+            auto colonPos = fileSpec.find(':');
+            if (colonPos != std::string::npos) {
+                mockFileName = fileSpec.substr(0, colonPos);
+                mockFileSize = std::stoul(fileSpec.substr(colonPos + 1));
+            } else {
+                mockFileName = fileSpec;
+            }
+        }
+    }
+    
+    try {
+        std::cout << "Initializing i2pd node...\n";
+        i2p::config::Init();
+        i2p::embed::I2PdUtils::initNode("chunked-server", dataDir, configPath);
+        i2p::embed::I2PdUtils::startCore();
+        
+        std::cout << "Creating server destination...\n";
+        auto serverDest = i2p::embed::I2PdUtils::createDestination(true); // public
+        
+        if (!i2p::embed::I2PdUtils::waitForDestinationReady(serverDest, 30000)) {
+            std::cerr << "ERROR: Server destination not ready\n";
+            return 1;
+        }
+        
+        std::cout << "Starting chunked file server...\n";
+        ChunkedFileServer server(serverDest);
+        
+        // Generate mock file
+        std::cout << "Generating mock file: " << mockFileName << " (" << mockFileSize << " bytes)\n";
+        server.generateMockFile(mockFileName, mockFileSize, mockFileName);
+        
+        server.start();
+        
+        if (!server.isReady()) {
+            std::cerr << "ERROR: Server failed to start\n";
+            return 1;
+        }
+        
+        std::cout << "\n=== SERVER READY ===\n";
+        std::cout << "Server Address: " << server.getB32Address() << "\n";
+        std::cout << "Available Files:\n";
+        for (const auto& filename : server.getFileList()) {
+            std::cout << "  - " << filename << "\n";
+        }
+        std::cout << "Status: " << server.getStatus() << "\n";
+        std::cout << "Press Ctrl+C to stop...\n\n";
+        
+        // Keep server running
+        while (server.isReady()) {
+            std::this_thread::sleep_for(1000ms);
+        }
+        
+        std::cout << "Server shutting down...\n";
+        server.stop();
+        i2p::embed::I2PdUtils::stopCore();
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Server exception: " << e.what() << "\n";
+        return 1;
+    }
+    
+    return 0;
+}
+
+int runClient(int argc, char* argv[]) {
+    std::string configPath;
+    std::string dataDir;
+    std::string serverB32;
+    std::string filename = "test.bin";
+    int timeout = 30000;
+    
+    // Parse client arguments
+    for (int i = 2; i < argc; ++i) {
+        std::string arg = argv[i];
+        
+        if (arg == "--conf" && i + 1 < argc) {
+            configPath = argv[++i];
+        } else if (arg == "--datadir" && i + 1 < argc) {
+            dataDir = argv[++i];
+        } else if (arg == "--server-b32" && i + 1 < argc) {
+            serverB32 = argv[++i];
+        } else if (arg == "--file" && i + 1 < argc) {
+            filename = argv[++i];
+        } else if (arg == "--timeout" && i + 1 < argc) {
+            timeout = std::stoi(argv[++i]);
+        }
+    }
+    
+    if (serverB32.empty()) {
+        std::cerr << "ERROR: --server-b32 is required for client mode\n";
+        printUsage(argv[0]);
+        return 1;
+    }
+    
+    try {
+        std::cout << "Initializing i2pd node...\n";
+        i2p::config::Init();
+        i2p::embed::I2PdUtils::initNode("chunked-client", dataDir, configPath);
+        i2p::embed::I2PdUtils::startCore();
+        
+        std::cout << "Creating client destination...\n";
+        auto clientDest = i2p::embed::I2PdUtils::createDestination(false); // private
+        
+        if (!i2p::embed::I2PdUtils::waitForDestinationReady(clientDest, 30000)) {
+            std::cerr << "ERROR: Client destination not ready\n";
+            return 1;
+        }
+        
+        std::cout << "Starting chunked file client...\n";
+        ChunkedFileClient client(clientDest);
+        
+        if (!client.isReady()) {
+            std::cerr << "ERROR: Client not ready\n";
+            return 1;
+        }
+        
+        LogPrint(eLogInfo, "\n=== STARTING FILE TRANSFER ===");
+        LogPrint(eLogInfo, "Server: ", serverB32);
+        LogPrint(eLogInfo, "File: ", filename);
+        LogPrint(eLogInfo, "Timeout: ", timeout, " ms");
+        LogPrint(eLogInfo, "Client Status: ", client.getStatus());
+        
+        // Request file transfer
+        auto result = client.requestFile(serverB32, filename, timeout);
+        
+        // Print results
+        printTransferStats(result);
+        
+        if (result.success) {
+            LogPrint(eLogInfo, "SUCCESS: File transfer completed successfully!");
+            LogPrint(eLogInfo, "Downloaded ", result.data.size(), " bytes in ", 
+                      result.stats.getTransferTime().count(), " ms");
+        } else {
+            LogPrint(eLogError, "FAILED: ", result.error);
+        }
+        
+        LogPrint(eLogInfo, "Client shutting down...");
+        i2p::embed::I2PdUtils::stopCore();
+        
+        return result.success ? 0 : 1;
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Client exception: " << e.what() << "\n";
+        return 1;
+    }
+}
+
+int main(int argc, char* argv[]) {
+    if (argc < 2) {
+        printUsage(argv[0]);
+        return 1;
+    }
+
+    const std::string mode = argv[1];
+    if (mode == "server")
+        return runServer(argc, argv);
+
+    if (mode == "client")
+        return runClient(argc, argv);
+
+    std::cerr << "ERROR: Unknown mode '" << mode << "'\n";
+    printUsage(argv[0]);
+    return 1;
+}

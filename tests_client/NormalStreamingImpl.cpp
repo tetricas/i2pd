@@ -341,10 +341,13 @@ void NormalStreamServer::receiveLoop(std::shared_ptr<stream::Stream> stream)
         
         // Call handler to get response
         std::string response;
-        if (m_handler)
-            response = m_handler(data);
-        else
+        if (m_handler) {
+            // Get client identity hash from stream
+            auto clientHash = stream->GetRemoteIdentity()->GetIdentHash();
+            response = m_handler(data, clientHash);
+        } else {
             response = "echo: " + data;  // Default echo
+        }
         
         LogPrint(eLogInfo, "NormalServer: Sending response: [", response, "]");
         if (auto sent = stream->Send(reinterpret_cast<const uint8_t*>(response.data()), response.size()); 
