@@ -3,6 +3,10 @@
 #include "StreamInterface.h"
 #include <atomic>
 #include <memory>
+#include <mutex>
+#include <condition_variable>
+#include <mutex>
+#include <condition_variable>
 
 
 namespace i2p::embed {
@@ -14,6 +18,12 @@ class NormalStreamClient final : public IStreamClient
 {
     std::shared_ptr<client::ClientDestination> m_destination;
     mutable std::string m_lastStatus;
+    
+    // For handling server response streams
+    std::mutex m_responseMutex;
+    std::condition_variable m_responseCondition;
+    std::string m_receivedResponse;
+    bool m_expectingResponse;
 
 public:
     explicit NormalStreamClient(std::shared_ptr<client::ClientDestination> destination);
@@ -30,6 +40,11 @@ private:
      * @brief Receive data from stream with retries
      */
     std::string receiveFromStream(std::shared_ptr<stream::Stream> stream, int timeout_ms);
+    
+    /**
+     * @brief Handle incoming stream from server (for response)
+     */
+    void handleIncomingServerStream(std::shared_ptr<stream::Stream> stream);
 };
 
 /**

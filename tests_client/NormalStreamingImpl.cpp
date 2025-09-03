@@ -14,7 +14,8 @@ namespace i2p::embed {
 // NormalStreamClient Implementation
 
 NormalStreamClient::NormalStreamClient(std::shared_ptr<client::ClientDestination> destination)
-    : m_destination(std::move(destination)) {
+    : m_destination(std::move(destination)), m_expectingResponse(false) {
+    // Single stream approach - no need for stream acceptor
 }
 
 std::string NormalStreamClient::sendMessage(const std::string& serverB32, 
@@ -35,46 +36,46 @@ std::string NormalStreamClient::sendMessage(const std::string& serverB32,
         m_destination->RequestDestination(serverHash);
         I2PdUtils::waitForLeaseSet(serverHash, timeout_ms / 2);
         
-        // Create stream
-        auto stream = m_destination->CreateStream(serverHash);
-        for (int i = 0; i < 50 && !stream; ++i)
-        {
-            std::this_thread::sleep_for(100ms);
-            stream = m_destination->CreateStream(serverHash);
-        }
+        LogPrint(eLogInfo, "NormalClient: Using single bidirectional stream for request-response");
         
+        // Create bidirectional stream (client ↔ server)
+        LogPrint(eLogInfo, "NormalClient: Creating bidirectional stream to server hash: ", serverHash.ToBase32().substr(0,16), "...");
+        auto stream = m_destination->CreateStream(serverHash);
         if (!stream)
         {
             m_lastStatus = "Failed to create stream";
-            LogPrint(eLogError, "NormalClient: CreateStream failed");
+            LogPrint(eLogError, "NormalClient: CreateStream failed for hash: ", serverHash.ToBase32().substr(0,16), "...");
             return "";
         }
         
-        LogPrint(eLogInfo, "NormalClient: Stream status: ", stream->GetStatus());
+        LogPrint(eLogInfo, "NormalClient: Stream created successfully, RecvStreamID=", stream->GetRecvStreamID(), ", SendStreamID=", stream->GetSendStreamID());
         
-        // Initial connect
+        // Send initial handshake immediately to trigger establishment
+        LogPrint(eLogInfo, "NormalClient: Sending initial handshake to trigger establishment");
         stream->Send(nullptr, 0);
         
-        // Wait for establishment
+        // Wait for establishment after handshake
         int establishWait = 0;
+        LogPrint(eLogInfo, "NormalClient: Waiting for stream establishment after handshake...");
         while (!stream->IsEstablished() && 
                stream->GetStatus() != stream::eStreamStatusReset &&
                establishWait < 100)
         {
+            if (establishWait % 10 == 0) {  // Log every 500ms
+                LogPrint(eLogInfo, "NormalClient: Stream establishment wait ", establishWait, "/100, status=", stream->GetStatus(), ", established=", stream->IsEstablished());
+            }
             std::this_thread::sleep_for(50ms);
             establishWait++;
         }
         
         if (!stream->IsEstablished())
         {
-            m_lastStatus = "Stream failed to establish";
-            LogPrint(eLogError, "NormalClient: Stream failed to establish");
+            m_lastStatus = "Stream failed to establish after handshake";
+            LogPrint(eLogError, "NormalClient: Stream failed to establish after handshake, final status=", stream->GetStatus());
             return "";
         }
         
-        LogPrint(eLogInfo, "NormalClient: Stream established, sending message: [", message, "]");
-        
-        // Send message
+        LogPrint(eLogInfo, "NormalClient: Sending request on bidirectional stream: [", message, "]");
         auto sent = stream->Send(reinterpret_cast<const uint8_t*>(message.data()), message.size());
         if (sent != message.size())
         {
@@ -83,23 +84,29 @@ std::string NormalStreamClient::sendMessage(const std::string& serverB32,
             return "";
         }
         
-        // Wait for transmission
-        std::this_thread::sleep_for(2000ms);
+        LogPrint(eLogInfo, "NormalClient: Request sent successfully: ", sent, " bytes");
         
-        if (!stream->IsOpen())
-        {
-            m_lastStatus = "Stream closed after send";
-            LogPrint(eLogError, "NormalClient: Stream is not open after send");
-            return "";
-        }
+        // Give server time to process request and send response
+        LogPrint(eLogInfo, "NormalClient: Waiting 500ms for server to process and respond...");
+        std::this_thread::sleep_for(500ms);
         
-        // Receive response
-        std::string response = receiveFromStream(stream, timeout_ms);
+        // Receive response on same bidirectional stream
+        LogPrint(eLogInfo, "NormalClient: Waiting for response on same stream...");
+        std::string response = receiveFromStream(stream, timeout_ms / 2);
         
         stream->Close();
-        m_lastStatus = response.empty() ? "No response received" : "Message exchange successful";
         
-        return response;
+        if (!response.empty())
+        {
+            m_lastStatus = "Message exchange successful";
+            return response;
+        }
+        else
+        {
+            m_lastStatus = "No response received";
+            LogPrint(eLogError, "NormalClient: No response received");
+            return "";
+        }
         
     } catch (const std::exception& e)
     {
@@ -111,6 +118,7 @@ std::string NormalStreamClient::sendMessage(const std::string& serverB32,
 
 std::string NormalStreamClient::receiveFromStream(std::shared_ptr<stream::Stream> stream, int timeout_ms)
 {
+    LogPrint(eLogInfo, "NormalClient: receiveFromStream starting on RecvStreamID=", stream->GetRecvStreamID(), ", SendStreamID=", stream->GetSendStreamID());
     uint8_t recv_buf[4096];
     std::string data;
     bool end = false;
@@ -120,7 +128,7 @@ std::string NormalStreamClient::receiveFromStream(std::shared_ptr<stream::Stream
     
     while (!end && numAttempts < MAX_ATTEMPTS)
     {
-        LogPrint(eLogDebug, "NormalClient: Receive attempt ", numAttempts + 1, ", stream status=", stream->GetStatus());
+        LogPrint(eLogDebug, "NormalClient: Receive attempt ", numAttempts + 1, ", stream status=", stream->GetStatus(), ", RecvStreamID=", stream->GetRecvStreamID(), ", SendStreamID=", stream->GetSendStreamID());
         
         if (const size_t received = stream->Receive(recv_buf, 4096, SHORT_TIMEOUT))
         {
@@ -263,19 +271,121 @@ std::string NormalStreamServer::getStatus() const
 void NormalStreamServer::handleIncomingStream(std::shared_ptr<stream::Stream> stream)
 {
     try {
-        receiveLoop(std::move(stream));
+        // Move receive loop to separate thread to avoid blocking streaming thread
+        LogPrint(eLogInfo, "NormalServer: Starting separate thread for receiveLoop to avoid blocking streaming");
+        std::thread([this, stream = std::move(stream)]() {
+            try {
+                receiveLoop(std::move(stream));
+            } catch (const std::exception& e) {
+                LogPrint(eLogError, "NormalServer: Exception in receive thread: ", e.what());
+            }
+        }).detach();
     } catch (const std::exception& e) {
         LogPrint(eLogError, "NormalServer: Exception in stream handler: ", e.what());
     }
 }
 
-void NormalStreamServer::receiveLoop(std::shared_ptr<stream::Stream> stream)
+void NormalStreamServer::receiveLoop(std::shared_ptr<stream::Stream> requestStream)
 {
-    LogPrint(eLogInfo, "NormalServer: Starting receiveLoop, stream status=", stream->GetStatus());
+    LogPrint(eLogInfo, "NormalServer: Starting receiveLoop for request stream");
     
     // Wait for stream establishment
     int establishWait = 0;
-    while (!stream->IsEstablished() &&
+    while (!requestStream->IsEstablished() &&
+           requestStream->GetStatus() != stream::eStreamStatusReset &&
+           establishWait < 100)
+    {
+        std::this_thread::sleep_for(50ms);
+        establishWait++;
+    }
+    
+    LogPrint(eLogInfo, "NormalServer: Request stream established=", requestStream->IsEstablished());
+    
+    // Allow time for data packets to arrive after stream establishment
+    LogPrint(eLogInfo, "NormalServer: Waiting 200ms for data packets to arrive...");
+    std::this_thread::sleep_for(200ms);
+    
+    // Receive request on unidirectional stream (client → server)
+    LogPrint(eLogInfo, "NormalServer: Starting to receive request data, stream RecvStreamID=", requestStream->GetRecvStreamID(), ", SendStreamID=", requestStream->GetSendStreamID());
+    
+    std::string request;
+    uint8_t recv_buf[4096];
+    
+    // Use shorter timeout to avoid blocking, but retry multiple times
+    LogPrint(eLogInfo, "NormalServer: Calling Receive() with shorter timeouts and retries...");
+    
+    int attempts = 0;
+    size_t totalReceived = 0;
+    while (attempts < 6 && totalReceived == 0) {  // 6 attempts = ~30 seconds total
+        LogPrint(eLogInfo, "NormalServer: Receive attempt ", attempts + 1, "/6...");
+        const size_t received = requestStream->Receive(recv_buf + totalReceived, sizeof(recv_buf) - totalReceived, 5);
+        LogPrint(eLogInfo, "NormalServer: Receive() attempt ", attempts + 1, " returned ", received, " bytes");
+        
+        if (received > 0) {
+            totalReceived += received;
+            LogPrint(eLogInfo, "NormalServer: Total received so far: ", totalReceived, " bytes");
+        }
+        attempts++;
+        
+        // Short sleep between attempts to not overwhelm the stream
+        if (received == 0 && attempts < 6) {
+            std::this_thread::sleep_for(100ms);
+        }
+    }
+    
+    if (totalReceived > 0)
+    {
+        request.assign(reinterpret_cast<char*>(recv_buf), totalReceived);
+        LogPrint(eLogInfo, "NormalServer: Received request: [", request, "], ", totalReceived, " bytes");
+    }
+    else
+    {
+        LogPrint(eLogWarning, "NormalServer: No request data received after ", attempts, " attempts, stream status=", requestStream->GetStatus());
+    }
+    auto clientHash = requestStream->GetRemoteIdentity()->GetIdentHash();
+    
+    if (!request.empty() && m_running.load())
+    {
+        LogPrint(eLogInfo, "NormalServer: Got request: [", request, "]");
+        
+        // Generate response
+        std::string response;
+        if (m_handler) {
+            response = m_handler(request, clientHash);
+        } else {
+            response = "echo: " + request;
+        }
+        
+        // Send response on same bidirectional stream (no need to create new stream)
+        LogPrint(eLogInfo, "NormalServer: Sending response: [", response, "] on same bidirectional stream");
+        auto sent = requestStream->Send(reinterpret_cast<const uint8_t*>(response.data()), response.size());
+        
+        if (sent == response.size())
+        {
+            LogPrint(eLogInfo, "NormalServer: Response sent successfully: ", sent, " bytes");
+        }
+        else
+        {
+            LogPrint(eLogError, "NormalServer: Partial response send: ", sent, "/", response.size());
+        }
+        
+        LogPrint(eLogInfo, "NormalServer: Response sent, letting client close the stream");
+    }
+    else
+    {
+        LogPrint(eLogWarning, "NormalServer: No request received, data.size()=", request.size());
+        LogPrint(eLogInfo, "NormalServer: Closing stream due to no request");
+        requestStream->Close();
+    }
+}
+
+void NormalStreamClient::handleIncomingServerStream(std::shared_ptr<stream::Stream> stream)
+{
+    LogPrint(eLogInfo, "NormalClient: Received incoming response stream from server");
+    
+    // Wait for stream establishment
+    int establishWait = 0;
+    while (!stream->IsEstablished() && 
            stream->GetStatus() != stream::eStreamStatusReset &&
            establishWait < 100)
     {
@@ -283,86 +393,37 @@ void NormalStreamServer::receiveLoop(std::shared_ptr<stream::Stream> stream)
         establishWait++;
     }
     
-    LogPrint(eLogInfo, "NormalServer: Stream established=", stream->IsEstablished(), ", status=", stream->GetStatus());
-    
-    // Server-side delay for message propagation
-    LogPrint(eLogInfo, "NormalServer: Waiting for client message propagation...");
-    std::this_thread::sleep_for(2000ms);
-    
-    uint8_t recv_buf[4096];
-    std::string data;
-    bool end = false;
-    int numAttempts = 0;
-    const int SHORT_TIMEOUT = 5;  // 5 seconds
-    const int MAX_ATTEMPTS = 8;   // 8 attempts
-    
-    while (!end && m_running.load())
+    if (!stream->IsEstablished())
     {
-        LogPrint(eLogDebug, "NormalServer: Receive attempt ", numAttempts + 1, ", stream status=", stream->GetStatus());
-        
-        if (const size_t received = stream->Receive(recv_buf, 4096, SHORT_TIMEOUT))
-        {
-            data.append(reinterpret_cast<char*>(recv_buf), received);
-            LogPrint(eLogInfo, "NormalServer: Received ", received, " bytes");
-            
-            // Check if stream is still valid for more data
-            if (stream->GetStatus() == stream::eStreamStatusReset ||
-                stream->GetStatus() == stream::eStreamStatusClosed)
-            {
-                end = true;
-            }
-        }
-        else if (stream->GetStatus() == stream::eStreamStatusReset ||
-                 stream->GetStatus() == stream::eStreamStatusClosed ||
-                 !m_running.load())
-        {
-            LogPrint(eLogInfo, "NormalServer: Stream ended or shutting down, status=", stream->GetStatus());
-            end = true;
-        }
-        else
-        {
-            LogPrint(eLogWarning, "NormalServer: Receive timeout, attempt ", numAttempts + 1);
-            numAttempts++;
-            if (numAttempts >= MAX_ATTEMPTS)
-            {
-                LogPrint(eLogError, "NormalServer: Max receive attempts exceeded");
-                end = true;
-            }
-        }
+        LogPrint(eLogError, "NormalClient: Server response stream failed to establish");
+        return;
     }
     
-    // Process remaining buffer
-    while (const size_t len = stream->ReadSome(recv_buf, sizeof(recv_buf)) && m_running.load())
-        data.append(reinterpret_cast<char*>(recv_buf), len);
+    // Receive response from server on unidirectional stream (server → client)
+    std::string response;
+    uint8_t recv_buf[4096];
     
-    if (!data.empty() && m_running.load())
+    if (const size_t received = stream->Receive(recv_buf, sizeof(recv_buf), 10))
     {
-        LogPrint(eLogInfo, "NormalServer: Got message: [", data, "]");
-        
-        // Call handler to get response
-        std::string response;
-        if (m_handler) {
-            // Get client identity hash from stream
-            auto clientHash = stream->GetRemoteIdentity()->GetIdentHash();
-            response = m_handler(data, clientHash);
-        } else {
-            response = "echo: " + data;  // Default echo
-        }
-        
-        LogPrint(eLogInfo, "NormalServer: Sending response: [", response, "]");
-        if (auto sent = stream->Send(reinterpret_cast<const uint8_t*>(response.data()), response.size()); 
-            sent != response.size())
-        {
-            LogPrint(eLogError, "NormalServer: Partial send: ", sent, "/", response.size());
-        }
-        else
-            LogPrint(eLogInfo, "NormalServer: Response sent successfully, ", sent, " bytes");
+        response.assign(reinterpret_cast<char*>(recv_buf), received);
+        LogPrint(eLogInfo, "NormalClient: Received response: [", response, "], ", received, " bytes");
     }
     else
-        LogPrint(eLogWarning, "NormalServer: No data received or shutting down, data.size()=", data.size());
+    {
+        LogPrint(eLogWarning, "NormalClient: No response data received");
+    }
+    
+    {
+        std::lock_guard<std::mutex> lock(m_responseMutex);
+        m_receivedResponse = response;
+        m_expectingResponse = false;
+    }
+    
+    LogPrint(eLogInfo, "NormalClient: Received response from server: [", response, "]");
+    m_responseCondition.notify_one();
     
     stream->Close();
-    LogPrint(eLogInfo, "NormalServer: Stream closed");
+    LogPrint(eLogInfo, "NormalClient: Response stream closed");
 }
 
 } // namespace i2p::embed

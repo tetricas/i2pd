@@ -77,9 +77,9 @@ std::shared_ptr<client::ClientDestination> I2PdUtils::createDestination(const bo
     const auto keys = data::PrivateKeys::CreateRandomKeys(data::SIGNING_KEY_TYPE_EDDSA_SHA512_ED25519);
     
     auto tunnelParams = std::map<std::string, std::string>{
-            {"inbound.length", "0"}, {"outbound.length", "0"},
+            {"inbound.length", "1"}, {"outbound.length", "1"},
             {"inbound.lengthVariance", "0"}, {"outbound.lengthVariance", "0"},
-            {"inbound.quantity", "1"}, {"outbound.quantity", "1"},
+            {"inbound.quantity", "3"}, {"outbound.quantity", "3"},
             {"i2cp.leaseSetEncType", "0"}
     };
     tunnelParams["i2cp.dontPublishLeaseSet"] = isPublic ? "false" : "true";

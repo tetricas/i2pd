@@ -50,8 +50,8 @@ int main(int argc, char** argv) {
             auto server = StreamFactory::createServer(protocolType, serverDest);
 
             // Define message handler
-            auto messageHandler = [](const std::string& message) -> std::string {
-                std::cout << "Server received: [" << message << "]" << std::endl;
+            auto messageHandler = [](const std::string& message, const i2p::data::IdentHash& clientHash) -> std::string {
+                std::cout << "Server received: [" << message << "] from client: " << clientHash.ToBase32().substr(0,8) << "..." << std::endl;
                 return "server echo: " + message;
             };
 
@@ -85,7 +85,7 @@ int main(int argc, char** argv) {
             auto clientDest = I2PdUtils::createDestination(false);
 
             // Wait for client destination to be ready
-            if (!I2PdUtils::waitForDestinationReady(clientDest, 10000)) {
+            if (!I2PdUtils::waitForDestinationReady(clientDest, 20000)) {
                 std::cerr << "Client destination failed to become ready" << std::endl;
                 return 1;
             }
