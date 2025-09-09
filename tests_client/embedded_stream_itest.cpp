@@ -5,9 +5,9 @@
 #include <thread>
 
 #include "Config.h"
-#include "CliParser.h"
-#include "I2PdUtils.h"
-#include "StreamInterface.h"
+#include "app/CliParser.h"
+#include "core/I2PdUtils.h"
+#include "transport/StreamInterface.h"
 
 using namespace std::chrono_literals;
 using namespace i2p::embed;

@@ -1,7 +1,7 @@
 #include "SimpleStreamingImpl.h"
-#include "I2PdUtils.h"
-#include "FileTransferLogging.h"
-#include "TransferConfig.h"
+#include "../core/I2PdUtils.h"
+#include "../core/FileTransferLogging.h"
+#include "../core/TransferConfig.h"
 #include "Log.h"
 #include <thread>
 #include <chrono>

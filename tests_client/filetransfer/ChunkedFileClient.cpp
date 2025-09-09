@@ -1,9 +1,9 @@
 #include "ChunkedFileClient.h"
-#include "I2PdUtils.h"
-#include "SimpleStreamingImpl.h"
-#include "FileTransferLogging.h"
-#include "TransferConfig.h"
-#include "ConnectionUtils.h"
+#include "../core/I2PdUtils.h"
+#include "../transport/SimpleStreamingImpl.h"
+#include "../core/FileTransferLogging.h"
+#include "../core/TransferConfig.h"
+#include "../core/ConnectionUtils.h"
 #include "Log.h"
 #include <sstream>
 using namespace std::chrono_literals;

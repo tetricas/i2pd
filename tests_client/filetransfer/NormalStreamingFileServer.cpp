@@ -1,7 +1,7 @@
 #include "NormalStreamingFileServer.h"
 #include "FileTransferProtocol.h"
-#include "FileTransferLogging.h"
-#include "TransferConfig.h"
+#include "../core/FileTransferLogging.h"
+#include "../core/TransferConfig.h"
 #include "Log.h"
 #include "Identity.h"
 #include <sstream>

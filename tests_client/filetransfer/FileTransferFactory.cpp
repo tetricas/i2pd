@@ -3,7 +3,7 @@
 #include "NormalStreamingFileClient.h"
 #include "NormalStreamingFileServer.h"
 #include "IFileTransfer.h"
-#include "FileTransferLogging.h"
+#include "../core/FileTransferLogging.h"
 
 namespace i2p::filetransfer
 {

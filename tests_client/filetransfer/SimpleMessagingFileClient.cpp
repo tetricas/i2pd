@@ -1,6 +1,6 @@
 #include "SimpleMessagingFileClient.h"
 #include "ChunkedFileServer.h"
-#include "FileTransferLogging.h"
+#include "../core/FileTransferLogging.h"
 #include "Log.h"
 
 namespace i2p::filetransfer

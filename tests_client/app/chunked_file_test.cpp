@@ -4,11 +4,11 @@
 #include <chrono>
 #include <iomanip>
 
-#include "I2PdUtils.h"
-#include "FileTransferFactory.h"
-#include "IFileTransfer.h"
-#include "TransferConfig.h"
-#include "FileTransferLogging.h"
+#include "../core/I2PdUtils.h"
+#include "../filetransfer/FileTransferFactory.h"
+#include "../filetransfer/IFileTransfer.h"
+#include "../core/TransferConfig.h"
+#include "../core/FileTransferLogging.h"
 #include "Config.h"
 #include "FS.h"
 #include "Log.h"

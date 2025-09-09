@@ -2,7 +2,7 @@
 
 #include "IFileTransfer.h"
 #include "BinaryFileProtocol.h"
-#include "NormalStreamingImpl.h"
+#include "../transport/NormalStreamingImpl.h"
 #include <memory>
 #include <chrono>
 

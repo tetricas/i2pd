@@ -1,16 +1,36 @@
 find_package(Boost REQUIRED COMPONENTS system filesystem program_options)
-include_directories(.)
+include_directories(. core transport filetransfer app)
 
-set(SOURCES
-        I2PdUtils.cpp
-        CliParser.cpp
-        StreamFactory.cpp
-        NormalStreamingImpl.cpp
-        SimpleStreamingImpl.cpp
-        ConnectionUtils.cpp
+# Core utilities
+set(CORE_SOURCES
+        core/I2PdUtils.cpp
+        core/ConnectionUtils.cpp
 )
 
-add_executable(embedded_stream_itest embedded_stream_itest.cpp ${SOURCES})
+# Transport layer
+set(TRANSPORT_SOURCES
+        transport/StreamFactory.cpp
+        transport/NormalStreamingImpl.cpp
+        transport/SimpleStreamingImpl.cpp
+)
+
+# File transfer layer
+set(FILETRANSFER_SOURCES
+        filetransfer/ChunkedFileClient.cpp
+        filetransfer/ChunkedFileServer.cpp
+        filetransfer/FileTransferFactory.cpp
+        filetransfer/SimpleMessagingFileClient.cpp
+        filetransfer/NormalStreamingFileClient.cpp
+        filetransfer/NormalStreamingFileServer.cpp
+        filetransfer/BinaryFileProtocol.cpp
+)
+
+# Application layer
+set(APP_SOURCES
+        app/CliParser.cpp
+)
+
+add_executable(embedded_stream_itest embedded_stream_itest.cpp ${CORE_SOURCES} ${TRANSPORT_SOURCES} ${APP_SOURCES})
 target_include_directories(embedded_stream_itest PRIVATE
         ${CMAKE_SOURCE_DIR}/libi2pd_client
         ${CMAKE_SOURCE_DIR}/libi2pd
@@ -26,18 +46,8 @@ target_link_libraries(embedded_stream_itest
         Threads::Threads
 )
 
-set(SOURCES_FTP
-        ChunkedFileClient.cpp
-        ChunkedFileServer.cpp
-        FileTransferFactory.cpp
-        SimpleMessagingFileClient.cpp
-        NormalStreamingFileClient.cpp
-        NormalStreamingFileServer.cpp
-        BinaryFileProtocol.cpp
-)
-
-add_executable(chunked_file_test chunked_file_test.cpp ${SOURCES} ${SOURCES_FTP})
-target_include_directories(embedded_stream_itest PRIVATE
+add_executable(chunked_file_test app/chunked_file_test.cpp ${CORE_SOURCES} ${TRANSPORT_SOURCES} ${FILETRANSFER_SOURCES} ${APP_SOURCES})
+target_include_directories(chunked_file_test PRIVATE
         ${CMAKE_SOURCE_DIR}/libi2pd_client
         ${CMAKE_SOURCE_DIR}/libi2pd
 )
