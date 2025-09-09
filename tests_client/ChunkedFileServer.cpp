@@ -1,6 +1,8 @@
 #include "ChunkedFileServer.h"
 #include "SimpleStreamingImpl.h"
 #include "I2PdUtils.h"
+#include "FileTransferLogging.h"
+#include "TransferConfig.h"
 #include "Log.h"
 #include <sstream>
 #include <algorithm>
@@ -30,8 +32,7 @@ void ChunkedFileServer::addMockFile(const std::string& filename, const std::vect
     metadata.sha256Checksum = ProtocolUtils::calculateSHA256(data);
     m_fileMetadata[filename] = metadata;
     
-    LogPrint(eLogInfo, "ChunkedFileServer: Added file '", filename, "' (", data.size(), " bytes, ", 
-             metadata.chunkCount, " chunks, checksum: ", metadata.sha256Checksum.substr(0, 8), "...)");
+    FT_LOG_INFO("ChunkedFileServer", "Added file '" << filename << "' (" << data.size() << " bytes, " << metadata.chunkCount << " chunks, checksum: " << metadata.sha256Checksum.substr(0, 8) << "...)");
 }
 
 void ChunkedFileServer::generateMockFile(const std::string& filename, size_t size, const std::string& seed)
@@ -44,13 +45,13 @@ void ChunkedFileServer::generateMockFile(const std::string& filename, size_t siz
 void ChunkedFileServer::start()
 {
     if (m_running.load()) {
-        LogPrint(eLogWarning, "ChunkedFileServer: Already running");
+        FT_LOG_WARNING("ChunkedFileServer", "Already running");
         return;
     }
     
     if (!isReady()) {
         m_lastStatus = "Destination not ready";
-        LogPrint(eLogError, "ChunkedFileServer: Destination not ready");
+        FT_LOG_ERROR("ChunkedFileServer", "Destination not ready");
         return;
     }
     
@@ -60,7 +61,7 @@ void ChunkedFileServer::start()
         
         if (!m_server) {
             m_lastStatus = "Failed to create stream server";
-            LogPrint(eLogError, "ChunkedFileServer: Failed to create stream server");
+            FT_LOG_ERROR("ChunkedFileServer", "Failed to create stream server");
             return;
         }
         
@@ -72,8 +73,8 @@ void ChunkedFileServer::start()
         m_running.store(true);
         m_lastStatus = "Server started successfully";
         
-        LogPrint(eLogInfo, "ChunkedFileServer: Server started on ", getB32Address());
-        LogPrint(eLogInfo, "ChunkedFileServer: Serving ", m_files.size(), " files");
+        FT_LOG_INFO("ChunkedFileServer", "Server started on " << getB32Address());
+        FT_LOG_INFO("ChunkedFileServer", "Serving " << m_files.size() << " files");
         
         // Log available files
         for (const auto& [filename, metadata] : m_fileMetadata) {
@@ -82,7 +83,7 @@ void ChunkedFileServer::start()
         
     } catch (const std::exception& e) {
         m_lastStatus = "Start failed: " + std::string(e.what());
-        LogPrint(eLogError, "ChunkedFileServer: Start exception: ", e.what());
+        FT_LOG_ERROR("ChunkedFileServer", "Start exception: " << e.what());
     }
 }
 
@@ -97,7 +98,7 @@ void ChunkedFileServer::stop()
         }
         
         m_lastStatus = "Server stopped";
-        LogPrint(eLogInfo, "ChunkedFileServer: Server stopped");
+        FT_LOG_INFO("ChunkedFileServer", "Server stopped");
     }
 }
 
@@ -146,7 +147,7 @@ std::string ChunkedFileServer::handleClientMessage(const std::string& clientMess
         // Parse simple TYPE:payload format
         size_t colonPos = clientMessage.find(':');
         if (colonPos == std::string::npos) {
-            LogPrint(eLogWarning, "ChunkedFileServer: Invalid message format");
+            FT_LOG_WARNING("ChunkedFileServer", "Invalid message format");
             return createErrorResponse(ErrorCode::INVALID_REQUEST, "Invalid message format");
         }
         
@@ -376,8 +377,8 @@ void ChunkedFileServer::handleFileTransferOnStream(const std::string& filename, 
         }
         
         // Wait a moment for client to set up stream acceptor
-        LogPrint(eLogInfo, "ChunkedFileServer: Waiting for client to setup stream acceptor...");
-        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        FT_LOG_INFO("ChunkedFileServer", "Waiting for client to setup stream acceptor...");
+        std::this_thread::sleep_for(std::chrono::milliseconds(i2p::filetransfer::TransferConfig::getConnectionTimeout() / 20));
         
         // Create stream to client directly using identity hash
         LogPrint(eLogInfo, "ChunkedFileServer: Creating stream to client using identity hash...");

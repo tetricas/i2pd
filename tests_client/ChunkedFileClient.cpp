@@ -1,6 +1,9 @@
 #include "ChunkedFileClient.h"
 #include "I2PdUtils.h"
 #include "SimpleStreamingImpl.h"
+#include "FileTransferLogging.h"
+#include "TransferConfig.h"
+#include "ConnectionUtils.h"
 #include "Log.h"
 #include <sstream>
 using namespace std::chrono_literals;
@@ -18,13 +21,13 @@ ChunkedFileClient::ChunkedFileClient(std::shared_ptr<client::ClientDestination> 
         if (streamingDest) {
             streamingDest->SetAcceptor([this](std::shared_ptr<stream::Stream> stream) {
                 if (stream) {
-                    LogPrint(eLogInfo, "ChunkedFileClient: Accepting incoming stream from server");
+                    FT_LOG_INFO("ChunkedFileClient", "Accepting incoming stream from server");
                     handleIncomingStream(stream);
                 }
             });
-            LogPrint(eLogInfo, "ChunkedFileClient: Stream acceptor configured");
+            FT_LOG_INFO("ChunkedFileClient", "Stream acceptor configured");
         } else {
-            LogPrint(eLogWarning, "ChunkedFileClient: Could not get streaming destination");
+            FT_LOG_WARNING("ChunkedFileClient", "Could not get streaming destination");
         }
     }
 }
@@ -47,7 +50,7 @@ ChunkedFileClient::TransferResult ChunkedFileClient::requestFile(
     // Note: startTime will be set when actual data reception begins
     
     try {
-        LogPrint(eLogInfo, "ChunkedFileClient: Starting file transfer for: ", filename, " using new stream architecture");
+        FT_LOG_INFO("ChunkedFileClient", "Starting file transfer for: " << filename << " using new stream architecture");
         result.stats.initTime = std::chrono::steady_clock::now();
 
         // Step 1: Send file request via SimpleSend (lightweight)
@@ -58,32 +61,21 @@ ChunkedFileClient::TransferResult ChunkedFileClient::requestFile(
             return result;
         }
         
-        // Parse server address
-        auto serverHash = embed::I2PdUtils::parseBase32(serverB32);
-        
-        // Request destination and wait for server's LeaseSet to be available
-        LogPrint(eLogInfo, "ChunkedFileClient: Requesting server destination...");
-        m_destination->RequestDestination(serverHash);
-        LogPrint(eLogInfo, "ChunkedFileClient: Waiting for server LeaseSet...");
-        embed::I2PdUtils::waitForLeaseSet(serverHash, timeout_ms / 2);
-        
-        // Create stream using the same method as SimpleStreamClient
-        auto requestStream = m_destination->CreateStream(serverHash);
-        for (int i = 0; i < 50 && !requestStream; ++i) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            requestStream = m_destination->CreateStream(serverHash);
-        }
-        
-        if (!requestStream) {
-            result.error = "Failed to create request stream";
+        // Use ConnectionUtils for consistent connection establishment
+        auto connectionResult = i2p::filetransfer::ConnectionUtils::establishConnection(
+            m_destination, serverB32, timeout_ms / 2);
+        if (!connectionResult) {
+            result.error = connectionResult.getError();
             m_lastStatus = result.error;
             return result;
         }
+        auto requestStream = connectionResult.getValue();
+        
         
         // Send request via SimpleSend
         result.stats.requestTime = std::chrono::steady_clock::now();
         std::string request = "1:filename=" + filename;
-        LogPrint(eLogInfo, "ChunkedFileClient: Sending request: ", request);
+        FT_LOG_INFO("ChunkedFileClient", "Sending request: " << request);
         requestStream->SimpleSend(request, true); // Expect response to trigger custom handler
         
         // Step 2: Wait for server to establish response stream
@@ -92,7 +84,7 @@ ChunkedFileClient::TransferResult ChunkedFileClient::requestFile(
             m_expectingResponse = true;
             m_currentResponseStream = nullptr;
             
-            LogPrint(eLogInfo, "ChunkedFileClient: Waiting for server response stream...");
+            FT_LOG_INFO("ChunkedFileClient", "Waiting for server response stream...");
             
             if (!m_streamCondition.wait_for(lock, std::chrono::milliseconds(timeout_ms / 2), 
                 [this] { return m_currentResponseStream != nullptr; })) {
@@ -101,7 +93,7 @@ ChunkedFileClient::TransferResult ChunkedFileClient::requestFile(
                 return result;
             }
             
-            LogPrint(eLogInfo, "ChunkedFileClient: Server response stream established");
+            FT_LOG_INFO("ChunkedFileClient", "Server response stream established");
         }
         
         // Step 3: Receive complete file on server's dedicated stream
@@ -111,15 +103,13 @@ ChunkedFileClient::TransferResult ChunkedFileClient::requestFile(
             result.stats.endTime = std::chrono::steady_clock::now();
             m_lastStatus = "Transfer completed successfully";
             
-            LogPrint(eLogInfo, "ChunkedFileClient: Transfer complete - ", 
-                     result.stats.totalBytes, " bytes in ", result.stats.getTransferTime().count(), "ms, ",
-                     result.stats.getThroughputKBps(), " KB/s");
+            FT_LOG_INFO("ChunkedFileClient", "Transfer complete - " << result.stats.totalBytes << " bytes in " << result.stats.getTransferTime().count() << "ms, " << result.stats.getThroughputKBps() << " KB/s");
         }
         
     } catch (const std::exception& e) {
         result.error = "Exception: " + std::string(e.what());
         m_lastStatus = result.error;
-        LogPrint(eLogError, "ChunkedFileClient: Exception: ", e.what());
+        FT_LOG_ERROR("ChunkedFileClient", "Exception: " << e.what());
     }
     
     // Cleanup
@@ -156,15 +146,14 @@ void ChunkedFileClient::handleIncomingStream(std::shared_ptr<stream::Stream> str
 {
     std::lock_guard<std::mutex> lock(m_incomingStreamsMutex);
     
-    LogPrint(eLogInfo, "ChunkedFileClient: Incoming stream received from server");
+    FT_LOG_INFO("ChunkedFileClient", "Incoming stream received from server");
     
     if (m_expectingResponse && !m_currentResponseStream) {
         m_currentResponseStream = stream;
-        LogPrint(eLogInfo, "ChunkedFileClient: Stream assigned for file transfer");
+        FT_LOG_INFO("ChunkedFileClient", "Stream assigned for file transfer");
         m_streamCondition.notify_one();
     } else {
-        LogPrint(eLogWarning, "ChunkedFileClient: Unexpected incoming stream - expecting=", 
-                 m_expectingResponse, ", current=", (m_currentResponseStream ? "set" : "null"));
+        LogPrint(eLogWarning, "ChunkedFileClient: Unexpected incoming stream - expecting=", m_expectingResponse, ", current=", (m_currentResponseStream ? "set" : "null"));
     }
 }
 
@@ -181,7 +170,7 @@ void ChunkedFileClient::receiveFileOnStream(
     
     try {
         result.stats.startTime = std::chrono::steady_clock::now();
-        LogPrint(eLogInfo, "ChunkedFileClient: Starting file reception on stream");
+        FT_LOG_INFO("ChunkedFileClient", "Starting file reception on stream");
         
         // Step 1: Read metadata message
         std::string metadataMsg = readMessageFromStream(stream, timeout_ms / 4);
@@ -203,8 +192,7 @@ void ChunkedFileClient::receiveFileOnStream(
             return;
         }
         
-        LogPrint(eLogInfo, "ChunkedFileClient: Metadata received - Size: ", metadata.totalSize,
-                 ", Checksum: ", metadata.sha256Checksum.substr(0, 8), "... (chunks will be discovered)");
+        FT_LOG_INFO("ChunkedFileClient", "Metadata received - Size: " << metadata.totalSize << ", Checksum: " << metadata.sha256Checksum.substr(0, 8) << "... (chunks will be discovered)");
         
         result.data.reserve(metadata.totalSize);
         
@@ -218,15 +206,14 @@ void ChunkedFileClient::receiveFileOnStream(
             
             auto chunkStart = std::chrono::steady_clock::now();
             
-            LogPrint(eLogInfo, "ChunkedFileClient: Reading chunk header for chunk ", chunkIndex, 
-                     " (received ", result.data.size(), "/", metadata.totalSize, " bytes so far)");
+            FT_LOG_INFO("ChunkedFileClient", "Reading chunk header for chunk " << chunkIndex << " (received " << result.data.size() << "/" << metadata.totalSize << " bytes so far)");
             
             // Read chunk header: [4 bytes chunk_index][4 bytes chunk_size]
-            std::vector<uint8_t> header = readChunkFromStream(stream, 8, 15000);
+            std::vector<uint8_t> header = readChunkFromStream(stream, 8, i2p::filetransfer::TransferConfig::getChunkTimeout());
             if (header.size() != 8) {
                 result.error = "Failed to receive chunk header " + std::to_string(chunkIndex) + 
                               " - got " + std::to_string(header.size()) + "/8 bytes";
-                LogPrint(eLogError, "ChunkedFileClient: Failed to receive chunk header ", chunkIndex);
+                FT_LOG_ERROR("ChunkedFileClient", "Failed to receive chunk header " << chunkIndex);
                 return;
             }
             
@@ -234,7 +221,7 @@ void ChunkedFileClient::receiveFileOnStream(
             uint32_t receivedIndex = header[0] | (header[1] << 8) | (header[2] << 16) | (header[3] << 24);
             uint32_t chunkSize = header[4] | (header[5] << 8) | (header[6] << 16) | (header[7] << 24);
             
-            LogPrint(eLogInfo, "ChunkedFileClient: Chunk header - index=", receivedIndex, ", size=", chunkSize);
+            FT_LOG_INFO("ChunkedFileClient", "Chunk header - index=" << receivedIndex << ", size=" << chunkSize);
             
             if (receivedIndex != chunkIndex) {
                 result.error = "Chunk index mismatch - expected " + std::to_string(chunkIndex) + 
@@ -248,7 +235,7 @@ void ChunkedFileClient::receiveFileOnStream(
             }
             
             // Read chunk data
-            auto chunkData = readChunkFromStream(stream, chunkSize, 15000);
+            auto chunkData = readChunkFromStream(stream, chunkSize, i2p::filetransfer::TransferConfig::getChunkTimeout());
             if (chunkData.size() != chunkSize) {
                 result.error = "Failed to receive chunk " + std::to_string(chunkIndex) + 
                               " data - expected " + std::to_string(chunkSize) + 
@@ -263,7 +250,7 @@ void ChunkedFileClient::receiveFileOnStream(
             result.stats.chunkTimes.push_back(chunkTime);
             result.stats.chunksReceived++;
             
-            LogPrint(eLogInfo, "ChunkedFileClient: Chunk ", chunkIndex + 1, " received (", chunkSize, " bytes)");
+            FT_LOG_INFO("ChunkedFileClient", "Chunk " << (chunkIndex + 1) << " received (" << chunkSize << " bytes)");
             
             chunkIndex++;
         }
@@ -273,7 +260,7 @@ void ChunkedFileClient::receiveFileOnStream(
         result.stats.totalBytes = result.data.size();
         
         // Step 3: Verify data integrity
-        LogPrint(eLogInfo, "ChunkedFileClient: Verifying data integrity...");
+        FT_LOG_INFO("ChunkedFileClient", "Verifying data integrity...");
         result.stats.verified = verifyData(result.data, metadata);
         
         if (!result.stats.verified) {
@@ -284,12 +271,11 @@ void ChunkedFileClient::receiveFileOnStream(
         result.success = true;
         result.stats.endTime = std::chrono::steady_clock::now();
         
-        LogPrint(eLogInfo, "ChunkedFileClient: File received successfully - ", 
-                 result.stats.totalBytes, " bytes verified");
+        FT_LOG_INFO("ChunkedFileClient", "File received successfully - " << result.stats.totalBytes << " bytes verified");
         
     } catch (const std::exception& e) {
         result.error = "Exception in receiveFileOnStream: " + std::string(e.what());
-        LogPrint(eLogError, "ChunkedFileClient: receiveFileOnStream exception: ", e.what());
+        FT_LOG_ERROR("ChunkedFileClient", "receiveFileOnStream exception: " << e.what());
     }
 }
 
@@ -303,11 +289,11 @@ std::string ChunkedFileClient::readMessageFromStream(std::shared_ptr<stream::Str
     
     if (bytesRead > 0) {
         std::string message(buffer.begin(), buffer.begin() + bytesRead);
-        LogPrint(eLogInfo, "ChunkedFileClient: Read metadata message: ", message);
+        FT_LOG_INFO("ChunkedFileClient", "Read metadata message: " << message);
         return message;
     }
     
-    LogPrint(eLogWarning, "ChunkedFileClient: Failed to read metadata message from stream");
+    FT_LOG_WARNING("ChunkedFileClient", "Failed to read metadata message from stream");
     return "";
 }
 
@@ -327,8 +313,7 @@ std::vector<uint8_t> ChunkedFileClient::readChunkFromStream(std::shared_ptr<stre
         
         if (bytesRead > 0) {
             totalBytesRead += bytesRead;
-            LogPrint(eLogInfo, "ChunkedFileClient: Read ", bytesRead, " bytes (", 
-                     totalBytesRead, "/", expectedSize, ")");
+            FT_LOG_INFO("ChunkedFileClient", "Read " << bytesRead << " bytes (" << totalBytesRead << "/" << expectedSize << ")");
         } else {
             // No data received, check if we should continue waiting
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -336,24 +321,21 @@ std::vector<uint8_t> ChunkedFileClient::readChunkFromStream(std::shared_ptr<stre
             remainingTimeout = timeout_ms - static_cast<int>(elapsed);
             
             if (remainingTimeout <= 0) {
-                LogPrint(eLogWarning, "ChunkedFileClient: Timeout reading chunk data, got ", 
-                         totalBytesRead, "/", expectedSize, " bytes after ", elapsed, "ms");
+                LogPrint(eLogWarning, "ChunkedFileClient: Timeout reading chunk data, got ", totalBytesRead, "/", expectedSize, " bytes after ", elapsed, "ms");
                 break;
             }
             
             // Brief pause before retry, but be more persistent
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            LogPrint(eLogDebug, "ChunkedFileClient: Waiting for more data, ", 
-                     totalBytesRead, "/", expectedSize, " bytes, ", remainingTimeout, "ms remaining");
+            FT_LOG_DEBUG("ChunkedFileClient", "Waiting for more data, " << totalBytesRead << "/" << expectedSize << " bytes, " << remainingTimeout << "ms remaining");
         }
     }
     
     if (totalBytesRead == expectedSize) {
-        LogPrint(eLogDebug, "ChunkedFileClient: Successfully read complete chunk: ", totalBytesRead, " bytes");
+        FT_LOG_DEBUG("ChunkedFileClient", "Successfully read complete chunk: " << totalBytesRead << " bytes");
         return buffer;
     } else {
-        LogPrint(eLogError, "ChunkedFileClient: Failed to read complete chunk - expected ", 
-                 expectedSize, ", got ", totalBytesRead, " bytes");
+        FT_LOG_ERROR("ChunkedFileClient", "Failed to read complete chunk - expected " << expectedSize << ", got " << totalBytesRead << " bytes");
         buffer.resize(totalBytesRead); // Return partial data
         return buffer;
     }
@@ -379,8 +361,7 @@ FileMetadata ChunkedFileClient::parseMetadata(const std::string& payload)
         }
     }
     
-    LogPrint(eLogDebug, "ChunkedFileClient: Parsed metadata - filename=", metadata.filename,
-             ", size=", metadata.totalSize, " (chunks will be discovered)");
+    FT_LOG_DEBUG("ChunkedFileClient", "Parsed metadata - filename=" << metadata.filename << ", size=" << metadata.totalSize << " (chunks will be discovered)");
     
     return metadata;
 }
@@ -397,7 +378,7 @@ std::string ChunkedFileClient::sendMessage(embed::SimpleStreamClient* client,
         std::string response = client->sendMessage(serverB32, message, timeout_ms);
         
         if (response.empty()) {
-            LogPrint(eLogWarning, "ChunkedFileClient: Empty response from server");
+            FT_LOG_WARNING("ChunkedFileClient", "Empty response from server");
             return "";
         }
         
@@ -405,7 +386,7 @@ std::string ChunkedFileClient::sendMessage(embed::SimpleStreamClient* client,
         // Handle potential "V" prefix from SimpleSend/SimpleReceive protocol
         size_t startPos = 0;
         if (response.size() > 0 && response[0] == 'V') {
-            LogPrint(eLogDebug, "ChunkedFileClient: Stripping 'V' prefix from response");
+            FT_LOG_DEBUG("ChunkedFileClient", "Stripping 'V' prefix from response");
             startPos = 1;
         }
         
@@ -416,11 +397,11 @@ std::string ChunkedFileClient::sendMessage(embed::SimpleStreamClient* client,
         }
         
         std::string responsePayload = response.substr(colonPos + 1);
-        LogPrint(eLogDebug, "ChunkedFileClient: Extracted payload: [", responsePayload, "]");
+        FT_LOG_DEBUG("ChunkedFileClient", "Extracted payload: [" << responsePayload << "]");
         return responsePayload;
         
     } catch (const std::exception& e) {
-        LogPrint(eLogError, "ChunkedFileClient: sendMessage exception: ", e.what());
+        FT_LOG_ERROR("ChunkedFileClient", "sendMessage exception: " << e.what());
         return "";
     }
 }
@@ -429,18 +410,18 @@ std::string ChunkedFileClient::sendMessage(embed::SimpleStreamClient* client,
 bool ChunkedFileClient::verifyData(const std::vector<uint8_t>& data, const FileMetadata& metadata) const
 {
     if (data.size() != metadata.totalSize) {
-        LogPrint(eLogError, "ChunkedFileClient: Size mismatch - expected ", metadata.totalSize, ", got ", data.size());
+        FT_LOG_ERROR("ChunkedFileClient", "Size mismatch - expected " << metadata.totalSize << ", got " << data.size());
         return false;
     }
     
     std::string actualChecksum = ProtocolUtils::calculateSHA256(data);
     
     if (actualChecksum != metadata.sha256Checksum) {
-        LogPrint(eLogError, "ChunkedFileClient: Checksum mismatch - expected ", metadata.sha256Checksum, ", got ", actualChecksum);
+        FT_LOG_ERROR("ChunkedFileClient", "Checksum mismatch - expected " << metadata.sha256Checksum << ", got " << actualChecksum);
         return false;
     }
     
-    LogPrint(eLogInfo, "ChunkedFileClient: Data verification successful");
+    FT_LOG_INFO("ChunkedFileClient", "Data verification successful");
     return true;
 }
 

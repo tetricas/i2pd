@@ -1,5 +1,7 @@
 #include "NormalStreamingFileServer.h"
 #include "FileTransferProtocol.h"
+#include "FileTransferLogging.h"
+#include "TransferConfig.h"
 #include "Log.h"
 #include "Identity.h"
 #include <sstream>
@@ -15,12 +17,12 @@ NormalStreamingFileServer::NormalStreamingFileServer(std::shared_ptr<client::Cli
 {
     if (!m_destination) {
         m_lastStatus = "Invalid destination provided";
-        LogPrint(eLogError, "NormalStreamingFileServer: Invalid destination");
+        FT_LOG_ERROR("NormalStreamingFileServer", "Invalid destination");
         return;
     }
     
     m_lastStatus = "Server created, ready to start";
-    LogPrint(eLogInfo, "NormalStreamingFileServer: Server created successfully");
+    FT_LOG_INFO("NormalStreamingFileServer", "Server created successfully");
 }
 
 void NormalStreamingFileServer::addMockFile(const std::string& filename, const std::vector<uint8_t>& data)
@@ -51,14 +53,15 @@ void NormalStreamingFileServer::start()
     // Wait for destination to be ready (give tunnels time to establish)
     if (!m_destination || !m_destination->IsReady()) {
         LogPrint(eLogInfo, "NormalStreamingFileServer: Waiting for destination to be ready...");
-        for (int i = 0; i < 100 && (!m_destination || !m_destination->IsReady()); ++i) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        int maxChecks = i2p::filetransfer::TransferConfig::getConnectionTimeout() / i2p::filetransfer::TransferConfig::getRetryDelayMs();
+        for (int i = 0; i < maxChecks && (!m_destination || !m_destination->IsReady()); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(i2p::filetransfer::TransferConfig::getRetryDelayMs()));
         }
     }
     
     if (!m_destination || !m_destination->IsReady()) {
         m_lastStatus = "Destination not ready after timeout";
-        LogPrint(eLogError, "NormalStreamingFileServer: Destination not ready after 10s timeout");
+        FT_LOG_ERROR("NormalStreamingFileServer", "Destination not ready after timeout");
         return;
     }
     
@@ -68,7 +71,7 @@ void NormalStreamingFileServer::start()
         
         if (!m_streamServer) {
             m_lastStatus = "Failed to create stream server";
-            LogPrint(eLogError, "NormalStreamingFileServer: Failed to create stream server");
+            FT_LOG_ERROR("NormalStreamingFileServer", "Failed to create stream server");
             return;
         }
         
@@ -78,8 +81,8 @@ void NormalStreamingFileServer::start()
         });
         
         m_lastStatus = "Server started successfully";
-        LogPrint(eLogInfo, "NormalStreamingFileServer: Server started on ", getB32Address());
-        LogPrint(eLogInfo, "NormalStreamingFileServer: Serving ", m_files.size(), " files");
+        FT_LOG_INFO("NormalStreamingFileServer", "Server started on " << getB32Address());
+        FT_LOG_INFO("NormalStreamingFileServer", "Serving " << m_files.size() << " files");
         
         // Log available files
         for (const auto& [filename, metadata] : m_fileMetadata) {
@@ -88,7 +91,7 @@ void NormalStreamingFileServer::start()
         
     } catch (const std::exception& e) {
         m_lastStatus = "Start failed: " + std::string(e.what());
-        LogPrint(eLogError, "NormalStreamingFileServer: Start exception: ", e.what());
+        FT_LOG_ERROR("NormalStreamingFileServer", "Start exception: " << e.what());
     }
 }
 
@@ -97,7 +100,7 @@ void NormalStreamingFileServer::stop()
     if (m_streamServer) {
         m_streamServer->stop();
         m_lastStatus = "Server stopped";
-        LogPrint(eLogInfo, "NormalStreamingFileServer: Server stopped");
+        FT_LOG_INFO("NormalStreamingFileServer", "Server stopped");
     }
 }
 

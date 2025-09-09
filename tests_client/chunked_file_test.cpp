@@ -24,7 +24,7 @@ void printUsage(const char* program) {
     std::cout << "Server Options:\n";
     std::cout << "  --conf <file>       Configuration file path\n";
     std::cout << "  --datadir <path>    Data directory path\n";
-    std::cout << "  --file <name:size>  Generate mock file (default: " << i2p::filetransfer::TransferConfig::getDefaultMockFileName() << ":" << i2p::filetransfer::TransferConfig::getDefaultMockFileSize() << " = " << (i2p::filetransfer::TransferConfig::getDefaultMockFileSize() / (1024*1024)) << "MB)\n";
+    std::cout << "  --file <name:size>  Generate mock file (default: " << TransferConfig::getDefaultMockFileName() << ":" << TransferConfig::getDefaultMockFileSize() << " = " << (TransferConfig::getDefaultMockFileSize() / (1024*1024)) << "MB)\n";
     std::cout << "  --simple            Use Simple Messaging protocol (default, reliable)\n";
     std::cout << "  --normal            Use Normal Streaming protocol (higher performance)\n\n";
     std::cout << "Client Options:\n";
@@ -32,7 +32,7 @@ void printUsage(const char* program) {
     std::cout << "  --datadir <path>    Data directory path\n";
     std::cout << "  --server-b32 <addr> Server's base32 address\n";
     std::cout << "  --file <filename>   File to download (default: test.bin)\n";
-    std::cout << "  --timeout <ms>      Transfer timeout in milliseconds (default: " << i2p::filetransfer::TransferConfig::getTransferTimeout() << ")\n";
+    std::cout << "  --timeout <ms>      Transfer timeout in milliseconds (default: " << TransferConfig::getTransferTimeout() << ")\n";
     std::cout << "  --simple            Use Simple Messaging protocol (default, reliable)\n";
     std::cout << "  --normal            Use Normal Streaming protocol (higher performance)\n\n";
     std::cout << "Examples:\n";
@@ -77,8 +77,8 @@ void printTransferStats(const IFileTransferClient::TransferResult& result) {
 int runServer(int argc, char* argv[]) {
     std::string configPath;
     std::string dataDir;
-    std::string mockFileName = i2p::filetransfer::TransferConfig::getDefaultMockFileName();
-    size_t mockFileSize = i2p::filetransfer::TransferConfig::getDefaultMockFileSize();
+    std::string mockFileName = TransferConfig::getDefaultMockFileName();
+    size_t mockFileSize = TransferConfig::getDefaultMockFileSize();
     TransferProtocol protocol = TransferProtocol::SIMPLE_MESSAGING; // Default to simple messaging
     
     // Parse server arguments
@@ -114,7 +114,7 @@ int runServer(int argc, char* argv[]) {
         std::cout << "Creating server destination...\n";
         auto serverDest = i2p::embed::I2PdUtils::createDestination(true); // public
         
-        if (!i2p::embed::I2PdUtils::waitForDestinationReady(serverDest, i2p::filetransfer::TransferConfig::getConnectionTimeout())) {
+        if (!i2p::embed::I2PdUtils::waitForDestinationReady(serverDest, TransferConfig::getConnectionTimeout())) {
             std::cerr << "ERROR: Server destination not ready\n";
             return 1;
         }
@@ -169,8 +169,8 @@ int runClient(int argc, char* argv[]) {
     std::string configPath;
     std::string dataDir;
     std::string serverB32;
-    std::string filename = i2p::filetransfer::TransferConfig::getDefaultMockFileName();
-    int timeout = i2p::filetransfer::TransferConfig::getTransferTimeout();
+    std::string filename = TransferConfig::getDefaultMockFileName();
+    int timeout = TransferConfig::getTransferTimeout();
     TransferProtocol protocol = TransferProtocol::SIMPLE_MESSAGING; // Default to simple messaging
     
     // Parse client arguments
@@ -209,7 +209,7 @@ int runClient(int argc, char* argv[]) {
         std::cout << "Creating client destination...\n";
         auto clientDest = i2p::embed::I2PdUtils::createDestination(false); // private
         
-        if (!i2p::embed::I2PdUtils::waitForDestinationReady(clientDest, i2p::filetransfer::TransferConfig::getConnectionTimeout())) {
+        if (!i2p::embed::I2PdUtils::waitForDestinationReady(clientDest, TransferConfig::getConnectionTimeout())) {
             std::cerr << "ERROR: Client destination not ready\n";
             return 1;
         }
@@ -262,7 +262,7 @@ int runClient(int argc, char* argv[]) {
 int main(int argc, char* argv[]) {
     try {
         // Initialize transfer configuration defaults
-        i2p::filetransfer::TransferConfig::initializeDefaults();
+        TransferConfig::initializeDefaults();
         
         if (argc < 2) {
             printUsage(argv[0]);

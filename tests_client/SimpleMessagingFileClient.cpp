@@ -1,5 +1,6 @@
 #include "SimpleMessagingFileClient.h"
 #include "ChunkedFileServer.h"
+#include "FileTransferLogging.h"
 #include "Log.h"
 
 namespace i2p::filetransfer
@@ -9,7 +10,7 @@ namespace i2p::filetransfer
 SimpleMessagingFileClient::SimpleMessagingFileClient(std::shared_ptr<client::ClientDestination> destination)
     : m_impl(std::make_unique<ChunkedFileClient>(destination))
 {
-    LogPrint(eLogInfo, "SimpleMessagingFileClient: Created client wrapper");
+    FT_LOG_INFO("SimpleMessagingFileClient", "Created client wrapper");
 }
 
 IFileTransferClient::TransferResult SimpleMessagingFileClient::downloadFile(
@@ -17,7 +18,7 @@ IFileTransferClient::TransferResult SimpleMessagingFileClient::downloadFile(
     const std::string& filename,
     int timeout_ms)
 {
-    LogPrint(eLogInfo, "SimpleMessagingFileClient: Starting file download: ", filename);
+    FT_LOG_INFO("SimpleMessagingFileClient", "Starting file download: " << filename);
     
     auto result = m_impl->requestFile(serverB32, filename, timeout_ms);
     
@@ -45,7 +46,7 @@ std::string SimpleMessagingFileClient::getStatus() const
 SimpleMessagingFileServer::SimpleMessagingFileServer(std::shared_ptr<client::ClientDestination> destination)
     : m_impl(std::make_unique<ChunkedFileServer>(destination))
 {
-    LogPrint(eLogInfo, "SimpleMessagingFileServer: Created server wrapper");
+    FT_LOG_INFO("SimpleMessagingFileServer", "Created server wrapper");
 }
 
 void SimpleMessagingFileServer::addMockFile(const std::string& filename, const std::vector<uint8_t>& data)

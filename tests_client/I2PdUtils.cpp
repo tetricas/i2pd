@@ -1,4 +1,6 @@
 #include "I2PdUtils.h"
+#include "FileTransferLogging.h"
+#include "TransferConfig.h"
 #include <iostream>
 #include <thread>
 #include <chrono>
@@ -44,23 +46,23 @@ void I2PdUtils::initNode(const std::string& mode, const std::string& datadir, co
     std::string bandwidth; 
     config::GetOption("bandwidth", bandwidth);
     context.SetBandwidth(bandwidth[0]);
-    LogPrint(eLogInfo, "Bandwidth set to ", context.GetBandwidthLimit(), "KBps");
+    FT_LOG_INFO("I2PdUtils", "Bandwidth set to " << context.GetBandwidthLimit() << "KBps");
     initTrust();
 }
 
 void I2PdUtils::startCore()
 {
     log::Logger().Start();
-    LogPrint(eLogInfo, "Starting NetDB");
+    FT_LOG_INFO("I2PdUtils", "Starting NetDB");
     data::netdb.Start();
     transport::transports.Start(true, false); // NTCP2 on, SSU2 off
     if (transport::transports.IsBoundNTCP2()) {
-        LogPrint(eLogInfo, "Transports started");
+        FT_LOG_INFO("I2PdUtils", "Transports started");
         verifyNTCP2Published();
     }
-    LogPrint(eLogInfo, "Starting Tunnels");
+    FT_LOG_INFO("I2PdUtils", "Starting Tunnels");
     tunnel::tunnels.Start();
-    LogPrint(eLogInfo, "Starting Router context");
+    FT_LOG_INFO("I2PdUtils", "Starting Router context");
     context.Start();
 }
 
@@ -116,7 +118,7 @@ void I2PdUtils::initTrust()
     config::GetOption("trust.enabled", trust);
     if (trust)
     {
-        LogPrint(eLogInfo, "Explicit trust enabled");
+        FT_LOG_INFO("I2PdUtils", "Explicit trust enabled");
         std::string fam; 
         config::GetOption("trust.family", fam);
         std::string routers; 
@@ -147,20 +149,20 @@ void I2PdUtils::initTrust()
                 idents.insert(ident);
                 pos = comma + 1;
             } while (comma != std::string::npos);
-            LogPrint(eLogInfo, "Setting restricted routes to use ", idents.size(), " trusted routers");
+            FT_LOG_INFO("I2PdUtils", "Setting restricted routes to use " << idents.size() << " trusted routers");
             transport::transports.RestrictRoutesToRouters(idents);
             restricted = !idents.empty();
         }
         
         if (!restricted)
-            LogPrint(eLogError, "No trusted routers of families specified");
+            FT_LOG_ERROR("I2PdUtils", "No trusted routers of families specified");
     }
 
     bool hidden; 
     config::GetOption("trust.hidden", hidden);
     if (hidden)
     {
-        LogPrint(eLogInfo, "Daemon: Hidden mode enabled");
+        FT_LOG_INFO("I2PdUtils", "Hidden mode enabled");
         context.SetHidden(true);
     }
 }
@@ -175,7 +177,7 @@ data::IdentHash I2PdUtils::parseBase32(const std::string& base32)
 
 bool I2PdUtils::waitForDestinationReady(std::shared_ptr<client::ClientDestination> destination, const int timeout_ms)
 {
-    constexpr int check_interval_ms = 100;
+    const int check_interval_ms = i2p::filetransfer::TransferConfig::getRetryDelayMs();
     const int max_checks = timeout_ms / check_interval_ms;
     
     for (int i = 0; i < max_checks && !destination->IsReady(); ++i) {
@@ -187,7 +189,7 @@ bool I2PdUtils::waitForDestinationReady(std::shared_ptr<client::ClientDestinatio
 
 void I2PdUtils::waitForLeaseSet(const data::IdentHash& identHash, const int timeout_ms)
 {
-    constexpr int check_interval_ms = 100;
+    const int check_interval_ms = i2p::filetransfer::TransferConfig::getRetryDelayMs();
     const int max_checks = timeout_ms / check_interval_ms;
     
     for (int i = 0; i < max_checks && !data::netdb.FindLeaseSet(identHash); ++i) {
