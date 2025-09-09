@@ -3,7 +3,7 @@
 #include "NormalStreamingFileClient.h"
 #include "NormalStreamingFileServer.h"
 #include "IFileTransfer.h"
-#include "Log.h"
+#include "FileTransferLogging.h"
 
 namespace i2p::filetransfer
 {
@@ -13,21 +13,21 @@ std::unique_ptr<IFileTransferClient> FileTransferFactory::createClient(
     std::shared_ptr<client::ClientDestination> destination)
 {
     if (!destination) {
-        LogPrint(eLogError, "FileTransferFactory: Invalid destination provided");
+        FT_LOG_ERROR("Factory", "Invalid destination provided");
         return nullptr;
     }
     
     switch (protocol) {
         case TransferProtocol::SIMPLE_MESSAGING:
-            LogPrint(eLogInfo, "FileTransferFactory: Creating Simple Messaging file client");
+            FT_LOG_DEBUG("Factory", "Creating Simple Messaging file client");
             return std::make_unique<SimpleMessagingFileClient>(destination);
             
         case TransferProtocol::NORMAL_STREAMING:
-            LogPrint(eLogInfo, "FileTransferFactory: Creating Normal Streaming file client");
+            FT_LOG_DEBUG("Factory", "Creating Normal Streaming file client");
             return std::make_unique<NormalStreamingFileClient>(destination);
             
         default:
-            LogPrint(eLogError, "FileTransferFactory: Unknown protocol type");
+            FT_LOG_ERROR("Factory", "Unknown protocol type: " << static_cast<int>(protocol));
             return nullptr;
     }
 }
@@ -37,21 +37,21 @@ std::unique_ptr<IFileTransferServer> FileTransferFactory::createServer(
     std::shared_ptr<client::ClientDestination> destination)
 {
     if (!destination) {
-        LogPrint(eLogError, "FileTransferFactory: Invalid destination provided");
+        FT_LOG_ERROR("Factory", "Invalid destination provided");
         return nullptr;
     }
     
     switch (protocol) {
         case TransferProtocol::SIMPLE_MESSAGING:
-            LogPrint(eLogInfo, "FileTransferFactory: Creating Simple Messaging file server");
+            FT_LOG_DEBUG("Factory", "Creating Simple Messaging file server");
             return std::make_unique<SimpleMessagingFileServer>(destination);
             
         case TransferProtocol::NORMAL_STREAMING:
-            LogPrint(eLogInfo, "FileTransferFactory: Creating Normal Streaming file server");
+            FT_LOG_DEBUG("Factory", "Creating Normal Streaming file server");
             return std::make_unique<NormalStreamingFileServer>(destination);
             
         default:
-            LogPrint(eLogError, "FileTransferFactory: Unknown protocol type");
+            FT_LOG_ERROR("Factory", "Unknown protocol type: " << static_cast<int>(protocol));
             return nullptr;
     }
 }

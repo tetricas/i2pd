@@ -1,5 +1,7 @@
 #include "SimpleStreamingImpl.h"
 #include "I2PdUtils.h"
+#include "FileTransferLogging.h"
+#include "TransferConfig.h"
 #include "Log.h"
 #include <thread>
 #include <chrono>
@@ -33,24 +35,26 @@ std::string SimpleStreamClient::sendMessage(const std::string& serverB32,
         
         // Optional prefetch
         m_destination->RequestDestination(serverHash);
-        I2PdUtils::waitForLeaseSet(serverHash, timeout_ms / 2);
+        I2PdUtils::waitForLeaseSet(serverHash, i2p::filetransfer::TransferConfig::getLeaseSetTimeout());
         
         // Create stream
         auto stream = m_destination->CreateStream(serverHash);
-        for (int i = 0; i < 50 && !stream; ++i)
+        int maxRetries = i2p::filetransfer::TransferConfig::getMaxRetries();
+        auto retryDelay = i2p::filetransfer::TransferConfig::getRetryDelayMs();
+        for (int i = 0; i < maxRetries && !stream; ++i)
         {
-            std::this_thread::sleep_for(100ms);
+            std::this_thread::sleep_for(std::chrono::milliseconds(retryDelay));
             stream = m_destination->CreateStream(serverHash);
         }
         
         if (!stream)
         {
             m_lastStatus = "Failed to create stream";
-            LogPrint(eLogError, "SimpleClient: CreateStream failed");
+            FT_LOG_ERROR("SimpleClient", "CreateStream failed after " << i2p::filetransfer::TransferConfig::getMaxRetries() << " retries");
             return "";
         }
         
-        LogPrint(eLogInfo, "SimpleClient: Stream created, status: ", stream->GetStatus());
+        FT_LOG_DEBUG("SimpleClient", "Stream created, status: " << stream->GetStatus());
         
         // Wait for stream to establish connection - but SimpleSend works even without establishment
         for (int i = 0; i < 50 && !stream->IsEstablished(); ++i)
@@ -58,30 +62,30 @@ std::string SimpleStreamClient::sendMessage(const std::string& serverB32,
             std::this_thread::sleep_for(100ms);
         }
         
-        LogPrint(eLogInfo, "SimpleClient: Stream established: ", stream->IsEstablished());
-        LogPrint(eLogInfo, "SimpleClient: Stream status: ", stream->GetStatus());
-        LogPrint(eLogInfo, "SimpleClient: Sending message via SendEcho: [", message, "]");
+        FT_LOG_DEBUG("SimpleClient", "Stream established: " << stream->IsEstablished());
+        FT_LOG_DEBUG("SimpleClient", "Stream status: " << stream->GetStatus());
+        FT_LOG_DEBUG("SimpleClient", "Sending message via SendEcho: [" << message << "]");
         
         // Use SendEcho for reliable request-response (this uses ping protocol)
         stream->SimpleSend(message, true); // true = expect response
         
-        LogPrint(eLogInfo, "SimpleClient: SendEcho sent, waiting for response...");
+        FT_LOG_DEBUG("SimpleClient", "SendEcho sent, waiting for response...");
         
         // Use ReceiveEcho to get the response
-        LogPrint(eLogInfo, "SimpleClient: Calling SimpleReceive with timeout ", timeout_ms / 2, "ms");
+        FT_LOG_DEBUG("SimpleClient", "Calling SimpleReceive with timeout " << (timeout_ms / 2) << "ms");
         std::string response = stream->SimpleReceive(timeout_ms / 2);
-        LogPrint(eLogInfo, "SimpleClient: SimpleReceive returned: [", response, "], size=", response.size());
+        FT_LOG_DEBUG("SimpleClient", "SimpleReceive returned: [" << response << "], size=" << response.size());
         
         if (!response.empty())
         {
-            LogPrint(eLogInfo, "SimpleClient: ReceiveEcho success, got: [", response, "]");
+            FT_LOG_DEBUG("SimpleClient", "ReceiveEcho success, got: [" << response << "]");
             m_lastStatus = "Message exchange successful";
             return response;
         }
         else
         {
             m_lastStatus = "ReceiveEcho timeout or failed";
-            LogPrint(eLogWarning, "SimpleClient: ReceiveEcho timeout or failed");
+            FT_LOG_WARN("SimpleClient", "ReceiveEcho timeout or failed");
             return "";
         }
         
@@ -89,7 +93,7 @@ std::string SimpleStreamClient::sendMessage(const std::string& serverB32,
     catch (const std::exception& e)
     {
         m_lastStatus = "Exception: " + std::string(e.what());
-        LogPrint(eLogError, "SimpleClient: Exception: ", e.what());
+        FT_LOG_ERROR("SimpleClient", "Exception: " << e.what());
         return "";
     }
 }
@@ -126,7 +130,7 @@ void SimpleStreamServer::start(const MessageHandler handler)
 {
     if (m_running.load())
     {
-        LogPrint(eLogWarning, "SimpleServer: Already running");
+        FT_LOG_WARN("SimpleServer", "Already running");
         return;
     }
     
@@ -134,39 +138,39 @@ void SimpleStreamServer::start(const MessageHandler handler)
     m_running.store(true);
     
     // Wait for destination to be ready and published
-    if (!I2PdUtils::waitForDestinationReady(m_destination, 20000))
+    if (!I2PdUtils::waitForDestinationReady(m_destination, i2p::filetransfer::TransferConfig::getConnectionTimeout()))
     {
         m_lastStatus = "Destination failed to become ready";
-        LogPrint(eLogError, "SimpleServer: Destination not ready");
+        FT_LOG_ERROR("SimpleServer", "Destination not ready");
         return;
     }
     
     // Extra safety: wait until NetDb can return our LeaseSet
-    I2PdUtils::waitForLeaseSet(m_destination->GetIdentHash(), 20000);
+    I2PdUtils::waitForLeaseSet(m_destination->GetIdentHash(), i2p::filetransfer::TransferConfig::getLeaseSetTimeout());
     
-    LogPrint(eLogInfo, "SimpleServer: Server ready, b32: ", getB32Address());
+    FT_LOG_INFO("SimpleServer", "Server ready, b32: " << getB32Address());
     
     // Set simple message handler on the streaming destination
     auto streamingDest = m_destination->GetStreamingDestination();
     if (!streamingDest) {
-        LogPrint(eLogError, "SimpleServer: Failed to get streaming destination");
+        FT_LOG_ERROR("SimpleServer", "Failed to get streaming destination");
         m_lastStatus = "Failed to get streaming destination";
         return;
     }
     
     streamingDest->SetSimpleMessageHandler([this](const std::string& message, const i2p::data::IdentHash& clientHash) -> std::string {
-        LogPrint(eLogInfo, "SimpleServer: Simple message handler called with: [", message, "] from client: ", clientHash.ToBase32().substr(0, 8), "...");
+        FT_LOG_DEBUG("SimpleServer", "Simple message handler called with: [" << message << "] from client: " << clientHash.ToBase32().substr(0, 8) << "...");
         if (m_handler) {
             std::string response = m_handler(message, clientHash);
-            LogPrint(eLogInfo, "SimpleServer: Handler returned: [", response, "]");
+            FT_LOG_DEBUG("SimpleServer", "Handler returned: [" << response << "]");
             return response;
         }
 
-        LogPrint(eLogInfo, "SimpleServer: No handler set, using echo");
+        FT_LOG_DEBUG("SimpleServer", "No handler set, using echo");
         return "echo: " + message;
     });
     
-    LogPrint(eLogInfo, "SimpleServer: Simple message handler installed");
+    FT_LOG_DEBUG("SimpleServer", "Simple message handler installed");
 
     m_lastStatus = "Server started and accepting simple messages";
 }
@@ -179,10 +183,10 @@ void SimpleStreamServer::stop()
         
         // Reset simple message handler
         if ( m_destination->ResetSimpleMessageHandler())
-            LogPrint(eLogInfo, "SimpleServer: Simple message handler reset");
+            FT_LOG_DEBUG("SimpleServer", "Simple message handler reset");
         
         m_lastStatus = "Server stopped";
-        LogPrint(eLogInfo, "SimpleServer: Server stopped");
+        FT_LOG_INFO("SimpleServer", "Server stopped");
     }
 }
 

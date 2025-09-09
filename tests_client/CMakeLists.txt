@@ -7,6 +7,7 @@ set(SOURCES
         StreamFactory.cpp
         NormalStreamingImpl.cpp
         SimpleStreamingImpl.cpp
+        ConnectionUtils.cpp
 )
 
 add_executable(embedded_stream_itest embedded_stream_itest.cpp ${SOURCES})

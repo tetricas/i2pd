@@ -7,6 +7,8 @@
 #include "I2PdUtils.h"
 #include "FileTransferFactory.h"
 #include "IFileTransfer.h"
+#include "TransferConfig.h"
+#include "FileTransferLogging.h"
 #include "Config.h"
 #include "FS.h"
 #include "Log.h"
@@ -22,7 +24,7 @@ void printUsage(const char* program) {
     std::cout << "Server Options:\n";
     std::cout << "  --conf <file>       Configuration file path\n";
     std::cout << "  --datadir <path>    Data directory path\n";
-    std::cout << "  --file <name:size>  Generate mock file (default: test.bin:104857600 = 100MB)\n";
+    std::cout << "  --file <name:size>  Generate mock file (default: " << i2p::filetransfer::TransferConfig::getDefaultMockFileName() << ":" << i2p::filetransfer::TransferConfig::getDefaultMockFileSize() << " = " << (i2p::filetransfer::TransferConfig::getDefaultMockFileSize() / (1024*1024)) << "MB)\n";
     std::cout << "  --simple            Use Simple Messaging protocol (default, reliable)\n";
     std::cout << "  --normal            Use Normal Streaming protocol (higher performance)\n\n";
     std::cout << "Client Options:\n";
@@ -30,7 +32,7 @@ void printUsage(const char* program) {
     std::cout << "  --datadir <path>    Data directory path\n";
     std::cout << "  --server-b32 <addr> Server's base32 address\n";
     std::cout << "  --file <filename>   File to download (default: test.bin)\n";
-    std::cout << "  --timeout <ms>      Transfer timeout in milliseconds (default: 30000)\n";
+    std::cout << "  --timeout <ms>      Transfer timeout in milliseconds (default: " << i2p::filetransfer::TransferConfig::getTransferTimeout() << ")\n";
     std::cout << "  --simple            Use Simple Messaging protocol (default, reliable)\n";
     std::cout << "  --normal            Use Normal Streaming protocol (higher performance)\n\n";
     std::cout << "Examples:\n";
@@ -42,41 +44,41 @@ void printUsage(const char* program) {
 }
 
 void printTransferStats(const IFileTransferClient::TransferResult& result) {
-    LogPrint(eLogInfo, "\n=== TRANSFER STATISTICS ===");
-    LogPrint(eLogInfo, "Success: ", (result.success ? "YES" : "NO"));
+    FT_LOG_INFO("Statistics", "\n=== TRANSFER STATISTICS ===");
+    FT_LOG_INFO("Statistics", "Success: " << (result.success ? "YES" : "NO"));
     
     if (!result.success) {
-        LogPrint(eLogError, "Error: ", result.error);
+        FT_LOG_ERROR("Statistics", "Error: " << result.error);
         return;
     }
     
     const auto& stats = result.stats;
     
-    LogPrint(eLogInfo, "Initialization Time: ", stats.getInitTime().count(), " ms");
-    LogPrint(eLogInfo, "Request Time: ", stats.getRequestTime().count(), " ms");
-    LogPrint(eLogInfo, "Total Transfer Time: ", stats.getTransferTime().count(), " ms");
-    LogPrint(eLogInfo, "Total Bytes: ", stats.totalBytes, " bytes (", 
-             std::fixed, std::setprecision(2), (stats.totalBytes / 1024.0), " KB)");
-    LogPrint(eLogInfo, "Chunks: ", stats.chunksReceived, "/", stats.chunksTotal);
-    LogPrint(eLogInfo, "Throughput: ", std::fixed, std::setprecision(2), 
-             stats.getThroughputKBps(), " KB/s");
-    LogPrint(eLogInfo, "Average Chunk Time: ", stats.getAverageChunkTime().count(), " ms");
-    LogPrint(eLogInfo, "Data Verified: ", (stats.verified ? "YES" : "NO"));
+    FT_LOG_INFO("Statistics", "Initialization Time: " << stats.getInitTime().count() << " ms");
+    FT_LOG_INFO("Statistics", "Request Time: " << stats.getRequestTime().count() << " ms");
+    FT_LOG_INFO("Statistics", "Total Transfer Time: " << stats.getTransferTime().count() << " ms");
+    FT_LOG_INFO("Statistics", "Total Bytes: " << stats.totalBytes << " bytes (" << 
+                std::fixed << std::setprecision(2) << (stats.totalBytes / 1024.0) << " KB)");
+    FT_LOG_INFO("Statistics", "Chunks: " << stats.chunksReceived << "/" << stats.chunksTotal);
+    FT_LOG_INFO("Statistics", "Throughput: " << std::fixed << std::setprecision(2) << 
+                stats.getThroughputKBps() << " KB/s");
+    FT_LOG_INFO("Statistics", "Average Chunk Time: " << stats.getAverageChunkTime().count() << " ms");
+    FT_LOG_INFO("Statistics", "Data Verified: " << (stats.verified ? "YES" : "NO"));
     
     if (!stats.chunkTimes.empty()) {
         auto minTime = *std::min_element(stats.chunkTimes.begin(), stats.chunkTimes.end());
         auto maxTime = *std::max_element(stats.chunkTimes.begin(), stats.chunkTimes.end());
-        LogPrint(eLogInfo, "Chunk Time Range: ", minTime.count(), " - ", maxTime.count(), " ms");
+        FT_LOG_INFO("Statistics", "Chunk Time Range: " << minTime.count() << " - " << maxTime.count() << " ms");
     }
     
-    LogPrint(eLogInfo, "===========================\n");
+    FT_LOG_INFO("Statistics", "===========================\n");
 }
 
 int runServer(int argc, char* argv[]) {
     std::string configPath;
     std::string dataDir;
-    std::string mockFileName = "test.bin";
-    size_t mockFileSize = 100 * 1024 * 1024; // 100MB default
+    std::string mockFileName = i2p::filetransfer::TransferConfig::getDefaultMockFileName();
+    size_t mockFileSize = i2p::filetransfer::TransferConfig::getDefaultMockFileSize();
     TransferProtocol protocol = TransferProtocol::SIMPLE_MESSAGING; // Default to simple messaging
     
     // Parse server arguments
@@ -112,7 +114,7 @@ int runServer(int argc, char* argv[]) {
         std::cout << "Creating server destination...\n";
         auto serverDest = i2p::embed::I2PdUtils::createDestination(true); // public
         
-        if (!i2p::embed::I2PdUtils::waitForDestinationReady(serverDest, 30000)) {
+        if (!i2p::embed::I2PdUtils::waitForDestinationReady(serverDest, i2p::filetransfer::TransferConfig::getConnectionTimeout())) {
             std::cerr << "ERROR: Server destination not ready\n";
             return 1;
         }
@@ -167,8 +169,8 @@ int runClient(int argc, char* argv[]) {
     std::string configPath;
     std::string dataDir;
     std::string serverB32;
-    std::string filename = "test.bin";
-    int timeout = 30000;
+    std::string filename = i2p::filetransfer::TransferConfig::getDefaultMockFileName();
+    int timeout = i2p::filetransfer::TransferConfig::getTransferTimeout();
     TransferProtocol protocol = TransferProtocol::SIMPLE_MESSAGING; // Default to simple messaging
     
     // Parse client arguments
@@ -207,7 +209,7 @@ int runClient(int argc, char* argv[]) {
         std::cout << "Creating client destination...\n";
         auto clientDest = i2p::embed::I2PdUtils::createDestination(false); // private
         
-        if (!i2p::embed::I2PdUtils::waitForDestinationReady(clientDest, 30000)) {
+        if (!i2p::embed::I2PdUtils::waitForDestinationReady(clientDest, i2p::filetransfer::TransferConfig::getConnectionTimeout())) {
             std::cerr << "ERROR: Client destination not ready\n";
             return 1;
         }
@@ -225,12 +227,12 @@ int runClient(int argc, char* argv[]) {
             return 1;
         }
         
-        LogPrint(eLogInfo, "\n=== STARTING FILE TRANSFER ===");
-        LogPrint(eLogInfo, "Protocol: ", FileTransferFactory::getProtocolName(protocol));
-        LogPrint(eLogInfo, "Server: ", serverB32);
-        LogPrint(eLogInfo, "File: ", filename);
-        LogPrint(eLogInfo, "Timeout: ", timeout, " ms");
-        LogPrint(eLogInfo, "Client Status: ", client->getStatus());
+        FT_LOG_INFO("Client", "\n=== STARTING FILE TRANSFER ===");
+        FT_LOG_INFO("Client", "Protocol: " << FileTransferFactory::getProtocolName(protocol));
+        FT_LOG_INFO("Client", "Server: " << serverB32);
+        FT_LOG_INFO("Client", "File: " << filename);
+        FT_LOG_INFO("Client", "Timeout: " << timeout << " ms");
+        FT_LOG_INFO("Client", "Client Status: " << client->getStatus());
         
         // Request file transfer
         auto result = client->downloadFile(serverB32, filename, timeout);
@@ -239,14 +241,14 @@ int runClient(int argc, char* argv[]) {
         printTransferStats(result);
         
         if (result.success) {
-            LogPrint(eLogInfo, "SUCCESS: File transfer completed successfully!");
-            LogPrint(eLogInfo, "Downloaded ", result.data.size(), " bytes in ", 
-                      result.stats.getTransferTime().count(), " ms");
+            FT_LOG_INFO("Client", "SUCCESS: File transfer completed successfully!");
+            FT_LOG_INFO("Client", "Downloaded " << result.data.size() << " bytes in " << 
+                        result.stats.getTransferTime().count() << " ms");
         } else {
-            LogPrint(eLogError, "FAILED: ", result.error);
+            FT_LOG_ERROR("Client", "FAILED: " << result.error);
         }
         
-        LogPrint(eLogInfo, "Client shutting down...");
+        FT_LOG_INFO("Client", "Client shutting down...");
         i2p::embed::I2PdUtils::stopCore();
         
         return result.success ? 0 : 1;
@@ -258,19 +260,28 @@ int runClient(int argc, char* argv[]) {
 }
 
 int main(int argc, char* argv[]) {
-    if (argc < 2) {
+    try {
+        // Initialize transfer configuration defaults
+        i2p::filetransfer::TransferConfig::initializeDefaults();
+        
+        if (argc < 2) {
+            printUsage(argv[0]);
+            return 1;
+        }
+
+        const std::string mode = argv[1];
+        if (mode == "server")
+            return runServer(argc, argv);
+
+        if (mode == "client")
+            return runClient(argc, argv);
+
+        std::cerr << "ERROR: Unknown mode '" << mode << "'\n";
         printUsage(argv[0]);
         return 1;
+        
+    } catch (const std::exception& e) {
+        FT_LOG_ERROR("Main", "Application error: " << e.what());
+        return 1;
     }
-
-    const std::string mode = argv[1];
-    if (mode == "server")
-        return runServer(argc, argv);
-
-    if (mode == "client")
-        return runClient(argc, argv);
-
-    std::cerr << "ERROR: Unknown mode '" << mode << "'\n";
-    printUsage(argv[0]);
-    return 1;
 }

@@ -1,5 +1,7 @@
 #include "NormalStreamingImpl.h"
 #include "I2PdUtils.h"
+#include "FileTransferLogging.h"
+#include "TransferConfig.h"
 #include "Log.h"
 #include <thread>
 #include <chrono>
@@ -34,17 +36,17 @@ std::string NormalStreamClient::sendMessage(const std::string& serverB32,
         
         // Optional prefetch
         m_destination->RequestDestination(serverHash);
-        I2PdUtils::waitForLeaseSet(serverHash, timeout_ms / 2);
+        I2PdUtils::waitForLeaseSet(serverHash, i2p::filetransfer::TransferConfig::getLeaseSetTimeout());
         
-        LogPrint(eLogInfo, "NormalClient: Using single bidirectional stream for request-response");
+        FT_LOG_DEBUG("NormalClient", "Using single bidirectional stream for request-response");
         
         // Create bidirectional stream (client ↔ server)
-        LogPrint(eLogInfo, "NormalClient: Creating bidirectional stream to server hash: ", serverHash.ToBase32().substr(0,16), "...");
+        FT_LOG_DEBUG("NormalClient", "Creating bidirectional stream to server hash: " << serverHash.ToBase32().substr(0,16) << "...");
         auto stream = m_destination->CreateStream(serverHash);
         if (!stream)
         {
             m_lastStatus = "Failed to create stream";
-            LogPrint(eLogError, "NormalClient: CreateStream failed for hash: ", serverHash.ToBase32().substr(0,16), "...");
+            FT_LOG_ERROR("NormalClient", "CreateStream failed for hash: " << serverHash.ToBase32().substr(0,16) << "...");
             return "";
         }
         
@@ -215,7 +217,7 @@ void NormalStreamServer::start(const MessageHandler handler)
     m_running.store(true);
     
     // Wait for destination to be ready and published
-    if (!I2PdUtils::waitForDestinationReady(m_destination, 20000))
+    if (!I2PdUtils::waitForDestinationReady(m_destination, i2p::filetransfer::TransferConfig::getConnectionTimeout()))
     {
         m_lastStatus = "Destination failed to become ready";
         LogPrint(eLogError, "NormalServer: Destination not ready");
@@ -223,7 +225,7 @@ void NormalStreamServer::start(const MessageHandler handler)
     }
     
     // Extra safety: wait until NetDb can return our LeaseSet
-    I2PdUtils::waitForLeaseSet(m_destination->GetIdentHash(), 20000);
+    I2PdUtils::waitForLeaseSet(m_destination->GetIdentHash(), i2p::filetransfer::TransferConfig::getLeaseSetTimeout());
     
     LogPrint(eLogInfo, "NormalServer: Server ready, b32: ", getB32Address());
     

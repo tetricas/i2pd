@@ -1,5 +1,6 @@
 #pragma once
 
+#include "IFileTransfer.h"
 #include "FileTransferProtocol.h"
 #include "Destination.h"
 #include "Streaming.h"
