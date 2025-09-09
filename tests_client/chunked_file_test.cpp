@@ -5,8 +5,8 @@
 #include <iomanip>
 
 #include "I2PdUtils.h"
-#include "ChunkedFileClient.h"
-#include "ChunkedFileServer.h"
+#include "FileTransferFactory.h"
+#include "IFileTransfer.h"
 #include "Config.h"
 #include "FS.h"
 #include "Log.h"
@@ -17,27 +17,31 @@ using namespace std::chrono_literals;
 void printUsage(const char* program) {
     std::cout << "Usage: " << program << " <mode> [options]\n\n";
     std::cout << "Modes:\n";
-    std::cout << "  server [--conf config.conf] [--datadir path] [--file filename:size]\n";
-    std::cout << "  client [--conf config.conf] [--datadir path] --server-b32 <address> --file <filename>\n\n";
+    std::cout << "  server [--conf config.conf] [--datadir path] [--file filename:size] [--simple|--normal]\n";
+    std::cout << "  client [--conf config.conf] [--datadir path] --server-b32 <address> --file <filename> [--simple|--normal]\n\n";
     std::cout << "Server Options:\n";
     std::cout << "  --conf <file>       Configuration file path\n";
     std::cout << "  --datadir <path>    Data directory path\n";
-    std::cout << "  --file <name:size>  Generate mock file (default: test.bin:10240)\n\n";
+    std::cout << "  --file <name:size>  Generate mock file (default: test.bin:104857600 = 100MB)\n";
+    std::cout << "  --simple            Use Simple Messaging protocol (default, reliable)\n";
+    std::cout << "  --normal            Use Normal Streaming protocol (higher performance)\n\n";
     std::cout << "Client Options:\n";
     std::cout << "  --conf <file>       Configuration file path\n";
     std::cout << "  --datadir <path>    Data directory path\n";
     std::cout << "  --server-b32 <addr> Server's base32 address\n";
     std::cout << "  --file <filename>   File to download (default: test.bin)\n";
-    std::cout << "  --timeout <ms>      Transfer timeout in milliseconds (default: 30000)\n\n";
+    std::cout << "  --timeout <ms>      Transfer timeout in milliseconds (default: 30000)\n";
+    std::cout << "  --simple            Use Simple Messaging protocol (default, reliable)\n";
+    std::cout << "  --normal            Use Normal Streaming protocol (higher performance)\n\n";
     std::cout << "Examples:\n";
-    std::cout << "  # Start server with 10KB test file\n";
-    std::cout << "  " << program << " server --conf srv.conf --datadir /tmp/srv\n\n";
-    std::cout << "  # Start client to download file\n";
+    std::cout << "  # Start server with 100MB test file using Simple Messaging\n";
+    std::cout << "  " << program << " server --conf srv.conf --datadir /tmp/srv --simple\n\n";
+    std::cout << "  # Start client using Normal Streaming\n";
     std::cout << "  " << program << " client --conf cli.conf --datadir /tmp/cli \\\n";
-    std::cout << "    --server-b32 abc123...xyz.b32.i2p --file test.bin\n";
+    std::cout << "    --server-b32 abc123...xyz.b32.i2p --file test.bin --normal\n";
 }
 
-void printTransferStats(const ChunkedFileClient::TransferResult& result) {
+void printTransferStats(const IFileTransferClient::TransferResult& result) {
     LogPrint(eLogInfo, "\n=== TRANSFER STATISTICS ===");
     LogPrint(eLogInfo, "Success: ", (result.success ? "YES" : "NO"));
     
@@ -73,6 +77,7 @@ int runServer(int argc, char* argv[]) {
     std::string dataDir;
     std::string mockFileName = "test.bin";
     size_t mockFileSize = 100 * 1024 * 1024; // 100MB default
+    TransferProtocol protocol = TransferProtocol::SIMPLE_MESSAGING; // Default to simple messaging
     
     // Parse server arguments
     for (int i = 2; i < argc; ++i) {
@@ -91,6 +96,10 @@ int runServer(int argc, char* argv[]) {
             } else {
                 mockFileName = fileSpec;
             }
+        } else if (arg == "--simple") {
+            protocol = TransferProtocol::SIMPLE_MESSAGING;
+        } else if (arg == "--normal") {
+            protocol = TransferProtocol::NORMAL_STREAMING;
         }
     }
     
@@ -108,36 +117,42 @@ int runServer(int argc, char* argv[]) {
             return 1;
         }
         
-        std::cout << "Starting chunked file server...\n";
-        ChunkedFileServer server(serverDest);
+        std::cout << "Starting file server with " << FileTransferFactory::getProtocolName(protocol) << " protocol...\n";
+        auto server = FileTransferFactory::createServer(protocol, serverDest);
+        
+        if (!server) {
+            std::cerr << "ERROR: Failed to create server\n";
+            return 1;
+        }
         
         // Generate mock file
         std::cout << "Generating mock file: " << mockFileName << " (" << mockFileSize << " bytes)\n";
-        server.generateMockFile(mockFileName, mockFileSize, mockFileName);
+        server->generateMockFile(mockFileName, mockFileSize, mockFileName);
         
-        server.start();
+        server->start();
         
-        if (!server.isReady()) {
+        if (!server->isReady()) {
             std::cerr << "ERROR: Server failed to start\n";
             return 1;
         }
         
         std::cout << "\n=== SERVER READY ===\n";
-        std::cout << "Server Address: " << server.getB32Address() << "\n";
+        std::cout << "Protocol: " << FileTransferFactory::getProtocolName(protocol) << "\n";
+        std::cout << "Server Address: " << server->getB32Address() << "\n";
         std::cout << "Available Files:\n";
-        for (const auto& filename : server.getFileList()) {
+        for (const auto& filename : server->getFileList()) {
             std::cout << "  - " << filename << "\n";
         }
-        std::cout << "Status: " << server.getStatus() << "\n";
+        std::cout << "Status: " << server->getStatus() << "\n";
         std::cout << "Press Ctrl+C to stop...\n\n";
         
         // Keep server running
-        while (server.isReady()) {
+        while (server->isReady()) {
             std::this_thread::sleep_for(1000ms);
         }
         
         std::cout << "Server shutting down...\n";
-        server.stop();
+        server->stop();
         i2p::embed::I2PdUtils::stopCore();
         
     } catch (const std::exception& e) {
@@ -154,6 +169,7 @@ int runClient(int argc, char* argv[]) {
     std::string serverB32;
     std::string filename = "test.bin";
     int timeout = 30000;
+    TransferProtocol protocol = TransferProtocol::SIMPLE_MESSAGING; // Default to simple messaging
     
     // Parse client arguments
     for (int i = 2; i < argc; ++i) {
@@ -169,6 +185,10 @@ int runClient(int argc, char* argv[]) {
             filename = argv[++i];
         } else if (arg == "--timeout" && i + 1 < argc) {
             timeout = std::stoi(argv[++i]);
+        } else if (arg == "--simple") {
+            protocol = TransferProtocol::SIMPLE_MESSAGING;
+        } else if (arg == "--normal") {
+            protocol = TransferProtocol::NORMAL_STREAMING;
         }
     }
     
@@ -192,22 +212,28 @@ int runClient(int argc, char* argv[]) {
             return 1;
         }
         
-        std::cout << "Starting chunked file client...\n";
-        ChunkedFileClient client(clientDest);
+        std::cout << "Starting file client with " << FileTransferFactory::getProtocolName(protocol) << " protocol...\n";
+        auto client = FileTransferFactory::createClient(protocol, clientDest);
         
-        if (!client.isReady()) {
+        if (!client) {
+            std::cerr << "ERROR: Failed to create client\n";
+            return 1;
+        }
+        
+        if (!client->isReady()) {
             std::cerr << "ERROR: Client not ready\n";
             return 1;
         }
         
         LogPrint(eLogInfo, "\n=== STARTING FILE TRANSFER ===");
+        LogPrint(eLogInfo, "Protocol: ", FileTransferFactory::getProtocolName(protocol));
         LogPrint(eLogInfo, "Server: ", serverB32);
         LogPrint(eLogInfo, "File: ", filename);
         LogPrint(eLogInfo, "Timeout: ", timeout, " ms");
-        LogPrint(eLogInfo, "Client Status: ", client.getStatus());
+        LogPrint(eLogInfo, "Client Status: ", client->getStatus());
         
         // Request file transfer
-        auto result = client.requestFile(serverB32, filename, timeout);
+        auto result = client->downloadFile(serverB32, filename, timeout);
         
         // Print results
         printTransferStats(result);

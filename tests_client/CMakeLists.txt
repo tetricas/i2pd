@@ -28,6 +28,11 @@ target_link_libraries(embedded_stream_itest
 set(SOURCES_FTP
         ChunkedFileClient.cpp
         ChunkedFileServer.cpp
+        FileTransferFactory.cpp
+        SimpleMessagingFileClient.cpp
+        NormalStreamingFileClient.cpp
+        NormalStreamingFileServer.cpp
+        BinaryFileProtocol.cpp
 )
 
 add_executable(chunked_file_test chunked_file_test.cpp ${SOURCES} ${SOURCES_FTP})

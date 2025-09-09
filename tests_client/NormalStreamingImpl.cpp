@@ -119,20 +119,25 @@ std::string NormalStreamClient::sendMessage(const std::string& serverB32,
 std::string NormalStreamClient::receiveFromStream(std::shared_ptr<stream::Stream> stream, int timeout_ms)
 {
     LogPrint(eLogInfo, "NormalClient: receiveFromStream starting on RecvStreamID=", stream->GetRecvStreamID(), ", SendStreamID=", stream->GetSendStreamID());
-    uint8_t recv_buf[4096];
+    
+    // OPTIMIZATION: Larger buffer for high-throughput streaming
+    const size_t BUFFER_SIZE = 1024 * 1024; // 1MB buffer for large file transfers
+    std::vector<uint8_t> recv_buf(BUFFER_SIZE);
     std::string data;
+    data.reserve(BUFFER_SIZE); // Pre-allocate for efficiency
+    
     bool end = false;
     int numAttempts = 0;
-    const int SHORT_TIMEOUT = 5;  // 5 seconds per attempt
+    const int SHORT_TIMEOUT = 30;  // 30 seconds per attempt for large transfers
     const int MAX_ATTEMPTS = std::max(1, timeout_ms / (SHORT_TIMEOUT * 1000));
     
     while (!end && numAttempts < MAX_ATTEMPTS)
     {
         LogPrint(eLogDebug, "NormalClient: Receive attempt ", numAttempts + 1, ", stream status=", stream->GetStatus(), ", RecvStreamID=", stream->GetRecvStreamID(), ", SendStreamID=", stream->GetSendStreamID());
         
-        if (const size_t received = stream->Receive(recv_buf, 4096, SHORT_TIMEOUT))
+        if (const size_t received = stream->Receive(recv_buf.data(), BUFFER_SIZE, SHORT_TIMEOUT))
         {
-            data.append(reinterpret_cast<char*>(recv_buf), received);
+            data.append(reinterpret_cast<char*>(recv_buf.data()), received);
             LogPrint(eLogInfo, "NormalClient: Received ", received, " bytes");
             
             // Check if stream is still valid for more data
@@ -148,19 +153,23 @@ std::string NormalStreamClient::receiveFromStream(std::shared_ptr<stream::Stream
             end = true;
         } else
         {
-            LogPrint(eLogWarning, "NormalClient: Receive timeout, attempt ", numAttempts + 1);
+            // Only log timeout warnings for small files or first few attempts
+            if (numAttempts < 3) {
+                LogPrint(eLogWarning, "NormalClient: Receive timeout, attempt ", numAttempts + 1);
+            }
             numAttempts++;
         }
     }
     
     // Process remaining buffer
-    while (const size_t len = stream->ReadSome(recv_buf, sizeof(recv_buf)))
-        data.append(reinterpret_cast<char*>(recv_buf), len);
+    while (const size_t len = stream->ReadSome(recv_buf.data(), recv_buf.size()))
+        data.append(reinterpret_cast<char*>(recv_buf.data()), len);
     
-    if (!data.empty())
-        LogPrint(eLogInfo, "NormalClient: Received response: [", data, "]");
-    else
+    if (!data.empty()) {
+        LogPrint(eLogInfo, "NormalClient: Received response: ", data.size(), " bytes total");
+    } else {
         LogPrint(eLogWarning, "NormalClient: No data received");
+    }
     
     return data;
 }
@@ -275,7 +284,7 @@ void NormalStreamServer::handleIncomingStream(std::shared_ptr<stream::Stream> st
         LogPrint(eLogInfo, "NormalServer: Starting separate thread for receiveLoop to avoid blocking streaming");
         std::thread([this, stream = std::move(stream)]() {
             try {
-                receiveLoop(std::move(stream));
+                receiveLoop(stream);
             } catch (const std::exception& e) {
                 LogPrint(eLogError, "NormalServer: Exception in receive thread: ", e.what());
             }
@@ -357,7 +366,6 @@ void NormalStreamServer::receiveLoop(std::shared_ptr<stream::Stream> requestStre
         }
         
         // Send response on same bidirectional stream (no need to create new stream)
-        LogPrint(eLogInfo, "NormalServer: Sending response: [", response, "] on same bidirectional stream");
         auto sent = requestStream->Send(reinterpret_cast<const uint8_t*>(response.data()), response.size());
         
         if (sent == response.size())
@@ -406,7 +414,7 @@ void NormalStreamClient::handleIncomingServerStream(std::shared_ptr<stream::Stre
     if (const size_t received = stream->Receive(recv_buf, sizeof(recv_buf), 10))
     {
         response.assign(reinterpret_cast<char*>(recv_buf), received);
-        LogPrint(eLogInfo, "NormalClient: Received response: [", response, "], ", received, " bytes");
+        LogPrint(eLogInfo, "NormalClient: Received ", received, " bytes");
     }
     else
     {
@@ -419,7 +427,7 @@ void NormalStreamClient::handleIncomingServerStream(std::shared_ptr<stream::Stre
         m_expectingResponse = false;
     }
     
-    LogPrint(eLogInfo, "NormalClient: Received response from server: [", response, "]");
+    LogPrint(eLogInfo, "NormalClient: Received response from server: ", response.size(), " bytes");
     m_responseCondition.notify_one();
     
     stream->Close();
