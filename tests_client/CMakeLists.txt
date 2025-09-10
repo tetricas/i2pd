@@ -5,6 +5,8 @@ include_directories(. core transport filetransfer app)
 set(CORE_SOURCES
         core/I2PdUtils.cpp
         core/ConnectionUtils.cpp
+        core/ErrorHandling.cpp
+        core/OperationContext.cpp
 )
 
 # Transport layer
@@ -12,6 +14,9 @@ set(TRANSPORT_SOURCES
         transport/StreamFactory.cpp
         transport/NormalStreamingImpl.cpp
         transport/SimpleStreamingImpl.cpp
+        transport/SimpleStreamingProvider.cpp
+        transport/NormalStreamingProvider.cpp
+        transport/StreamingProviderRegistry.cpp
 )
 
 # File transfer layer
@@ -23,6 +28,12 @@ set(FILETRANSFER_SOURCES
         filetransfer/NormalStreamingFileClient.cpp
         filetransfer/NormalStreamingFileServer.cpp
         filetransfer/BinaryFileProtocol.cpp
+        filetransfer/TransferStrategies.cpp
+        filetransfer/TransferStrategyRegistry.cpp
+        filetransfer/TransferSubject.cpp
+        filetransfer/TransferCommands.cpp
+        filetransfer/TransferCommandQueue.cpp
+        filetransfer/TransferConfigBuilder.cpp
 )
 
 # Application layer

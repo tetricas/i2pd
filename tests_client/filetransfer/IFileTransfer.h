@@ -1,5 +1,12 @@
 #pragma once
 
+/**
+ * @file IFileTransfer.h
+ * @brief Backward compatibility header - use IFileTransferInterfaces.h for new code
+ * @deprecated This file provides the original monolithic interfaces for backward compatibility.
+ *             New code should use the segregated interfaces in IFileTransferInterfaces.h
+ */
+
 #include "FileTransferProtocol.h"
 #include "Destination.h"
 #include <memory>
@@ -11,6 +18,7 @@ namespace i2p::filetransfer
 
 /**
  * @brief Abstract interface for file transfer clients
+ * @deprecated Use IFileDownloader + IReadyStatusProvider from IFileTransferInterfaces.h
  */
 class IFileTransferClient
 {
@@ -51,6 +59,7 @@ public:
 
 /**
  * @brief Abstract interface for file transfer servers
+ * @deprecated Use segregated interfaces from IFileTransferInterfaces.h
  */
 class IFileTransferServer
 {
