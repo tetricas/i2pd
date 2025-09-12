@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../core/StreamInterface.h"
+#include "StreamInterface.h"
 #include "../core/AdaptiveCompression.h" 
 #include "../core/BulkTransferOptimization.h"
 #include "../core/TransferResult.h"
@@ -28,7 +28,7 @@ namespace transport {
  * - Batched acknowledgments for bulk transfers
  * - File type detection for smart optimization
  */
-class PerformanceOptimizedStreaming : public IStreamClient, public IStreamServer {
+class PerformanceOptimizedStreaming : public i2p::embed::IStreamClient, public i2p::embed::IStreamServer {
 private:
     using BulkOptimizer = performance::BulkTransferOptimization;
     using CompressionAnalyzer = performance::AdaptiveCompression;
@@ -51,40 +51,39 @@ public:
     }
 
     // IStreamClient interface
-    core::TransferResult<std::string> sendMessage(const std::string& message) override {
-        return sendData(reinterpret_cast<const uint8_t*>(message.data()), message.size());
+    std::string sendMessage(const std::string& serverB32, 
+                           const std::string& message,
+                           int timeout_ms = 10000) override {
+        return message; // Placeholder implementation
+    }
+    
+    bool isReady() const override {
+        return true; // Placeholder implementation
+    }
+    
+    std::string getStatus() const override {
+        return "Ready"; // Placeholder implementation
     }
 
-    core::TransferResult<std::string> receiveMessage(int timeoutMs = 30000) override {
-        auto result = receiveData(timeoutMs);
-        if (result.isSuccess()) {
-            return core::TransferResult<std::string>::success(
-                std::string(result.getValue().begin(), result.getValue().end())
-            );
-        }
-        return core::TransferResult<std::string>::failure(result.getError());
-    }
-
-    // IStreamServer interface  
-    core::TransferResult<void> startListening(int port) override {
+    // IStreamServer interface
+    void start(i2p::embed::IStreamServer::MessageHandler handler) override {
         // Implementation would integrate with existing i2pd streaming server
-        return core::TransferResult<void>::success();
     }
 
-    core::TransferResult<void> stopListening() override {
-        return core::TransferResult<void>::success();
+    void stop() override {
+        // Implementation
+    }
+
+    std::string getB32Address() const override {
+        return "placeholder.b32.i2p"; // Placeholder implementation
     }
 
     /**
      * @brief Send binary data with performance optimizations
      */
-    core::TransferResult<std::vector<uint8_t>> sendData(const uint8_t* data, size_t size) {
+    i2p::filetransfer::TransferResult<std::vector<uint8_t>> sendData(const uint8_t* data, size_t size) {
         if (!data || size == 0) {
-            return core::TransferResult<std::vector<uint8_t>>::failure({
-                core::ErrorCategory::INVALID_PARAMETER,
-                "Invalid data or size",
-                core::ErrorSeverity::HIGH
-            });
+            return i2p::filetransfer::TransferResult<std::vector<uint8_t>>::Error("Invalid data or size");
         }
 
         try {
@@ -96,31 +95,23 @@ public:
             }
         }
         catch (const std::exception& e) {
-            return core::TransferResult<std::vector<uint8_t>>::failure({
-                core::ErrorCategory::TRANSPORT_ERROR,
-                std::string("Send failed: ") + e.what(),
-                core::ErrorSeverity::HIGH
-            });
+            return i2p::filetransfer::TransferResult<std::vector<uint8_t>>::Error(std::string("Send failed: ") + e.what());
         }
     }
 
     /**
      * @brief Receive binary data with performance optimizations
      */
-    core::TransferResult<std::vector<uint8_t>> receiveData(int timeoutMs = 30000) {
+    i2p::filetransfer::TransferResult<std::vector<uint8_t>> receiveData(int timeoutMs = 30000) {
         try {
             std::vector<uint8_t> buffer;
             // Implementation would integrate with optimized i2pd streaming receive
             // This is a placeholder for the actual integration
             
-            return core::TransferResult<std::vector<uint8_t>>::success(std::move(buffer));
+            return i2p::filetransfer::TransferResult<std::vector<uint8_t>>::Success(std::move(buffer));
         }
         catch (const std::exception& e) {
-            return core::TransferResult<std::vector<uint8_t>>::failure({
-                core::ErrorCategory::TRANSPORT_ERROR, 
-                std::string("Receive failed: ") + e.what(),
-                core::ErrorSeverity::HIGH
-            });
+            return i2p::filetransfer::TransferResult<std::vector<uint8_t>>::Error(std::string("Receive failed: ") + e.what());
         }
     }
 
@@ -165,7 +156,7 @@ private:
         m_context->startTime = std::chrono::steady_clock::now();
     }
 
-    core::TransferResult<std::vector<uint8_t>> sendRegularData(const uint8_t* data, size_t size) {
+    i2p::filetransfer::TransferResult<std::vector<uint8_t>> sendRegularData(const uint8_t* data, size_t size) {
         // For small transfers, use standard streaming with minimal optimizations
         
         // Make compression decision
@@ -177,10 +168,10 @@ private:
         
         // Implementation would integrate with existing i2pd streaming
         // This is a placeholder for the actual streaming send logic
-        return core::TransferResult<std::vector<uint8_t>>::success({});
+        return i2p::filetransfer::TransferResult<std::vector<uint8_t>>::Success({});
     }
 
-    core::TransferResult<std::vector<uint8_t>> sendBulkData(const uint8_t* data, size_t size) {
+    i2p::filetransfer::TransferResult<std::vector<uint8_t>> sendBulkData(const uint8_t* data, size_t size) {
         // For bulk transfers, apply all performance optimizations
         
         // Analyze data for optimization decisions
@@ -203,8 +194,7 @@ private:
             // Determine packet flags based on optimization logic
             bool isFirstPacket = (packetNumber == 0);
             bool isLastPacket = (bytesRemaining == chunkSize);
-            bool includeSignature = m_context->optimizer->shouldIncludeSignature(
-                isFirstPacket, isLastPacket);
+            bool includeSignature = m_context->optimizer->shouldIncludeSignature(isFirstPacket, isLastPacket);
             bool sendACK = m_context->optimizer->shouldSendACK(isFirstPacket || isLastPacket);
             
             // Send optimized packet
@@ -221,7 +211,7 @@ private:
             shouldCompress ? compressionDecision.estimatedSavings : 0);
         m_context->transferredBytes += size;
         
-        return core::TransferResult<std::vector<uint8_t>>::success({});
+        return i2p::filetransfer::TransferResult<std::vector<uint8_t>>::Success({});
     }
 };
 
@@ -239,26 +229,26 @@ public:
     };
 
     static std::unique_ptr<PerformanceOptimizedStreaming> createStreaming(ScenarioProfile profile) {
-        BulkOptimizer::OptimizationMode mode;
+        performance::BulkTransferOptimization::OptimizationMode mode;
         
         switch (profile) {
             case ScenarioProfile::INTERACTIVE:
-                mode = BulkOptimizer::OptimizationMode::CONSERVATIVE;
+                mode = performance::BulkTransferOptimization::OptimizationMode::CONSERVATIVE;
                 break;
             case ScenarioProfile::BULK_TRANSFER:
-                mode = BulkOptimizer::OptimizationMode::AGGRESSIVE;
+                mode = performance::BulkTransferOptimization::OptimizationMode::AGGRESSIVE;
                 break;
             case ScenarioProfile::MIXED_WORKLOAD:
-                mode = BulkOptimizer::OptimizationMode::ADAPTIVE;
+                mode = performance::BulkTransferOptimization::OptimizationMode::ADAPTIVE;
                 break;
             case ScenarioProfile::CPU_LIMITED:
-                mode = BulkOptimizer::OptimizationMode::CONSERVATIVE;
+                mode = performance::BulkTransferOptimization::OptimizationMode::CONSERVATIVE;
                 break;
             case ScenarioProfile::BANDWIDTH_LIMITED:
-                mode = BulkOptimizer::OptimizationMode::BALANCED;
+                mode = performance::BulkTransferOptimization::OptimizationMode::BALANCED;
                 break;
             default:
-                mode = BulkOptimizer::OptimizationMode::ADAPTIVE;
+                mode = performance::BulkTransferOptimization::OptimizationMode::ADAPTIVE;
         }
         
         return std::make_unique<PerformanceOptimizedStreaming>(mode);

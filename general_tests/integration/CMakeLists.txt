@@ -3,7 +3,7 @@
 
 # Full streaming integration test (existing embedded_stream_itest)
 add_executable(streaming_integration_test
-    ../../tests_client/app/embedded_stream_itest.cpp
+    ${TESTS_CLIENT_APP_DIR}/embedded_stream_itest.cpp
     ${CORE_SOURCES}
     ${TRANSPORT_SOURCES}
     ${APP_SOURCES}
@@ -12,7 +12,7 @@ target_link_libraries(streaming_integration_test ${COMMON_LIBRARIES})
 
 # File transfer integration test (existing chunked_file_test)  
 add_executable(file_transfer_integration_test
-    ../../tests_client/app/chunked_file_test.cpp
+    ${TESTS_CLIENT_APP_DIR}/chunked_file_test.cpp
     ${CORE_SOURCES}
     ${TRANSPORT_SOURCES}
     ${FILETRANSFER_SOURCES}

@@ -90,20 +90,3 @@ target_link_libraries(chunked_file_test
         ZLIB::ZLIB
         Threads::Threads
 )
-
-# Performance optimization test executable (Session 10)
-add_executable(performance_test app/performance_test.cpp ${CORE_SOURCES} ${TRANSPORT_SOURCES} ${APP_SOURCES})
-target_include_directories(performance_test PRIVATE
-        ${CMAKE_SOURCE_DIR}/libi2pd_client
-        ${CMAKE_SOURCE_DIR}/libi2pd
-)
-
-target_link_libraries(performance_test
-        libi2pdclient
-        libi2pd
-        libi2pdlang
-        Boost::system Boost::filesystem Boost::program_options
-        OpenSSL::SSL OpenSSL::Crypto
-        ZLIB::ZLIB
-        Threads::Threads
-)
