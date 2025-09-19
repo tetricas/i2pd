@@ -268,6 +268,7 @@ CMakeCache.txt
 cmake_install.cmake
 *.cmake
 !CMakeLists.txt
+general_tests/build*
 
 # debian stuff
 debian/i2pd.1.gz

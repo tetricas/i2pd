@@ -83,6 +83,17 @@ TransferResult<std::shared_ptr<stream::Stream>> ConnectionUtils::createStream(
     }
     
     FT_LOG_DEBUG("ConnectionUtils", "Stream created successfully, status: " << stream->GetStatus());
+    
+    // Log hop configuration for the destination that created this stream
+    auto streamingDest = destination->GetStreamingDestination();
+    if (streamingDest) {
+        auto tunnelPool = destination->GetTunnelPool();
+        if (tunnelPool) {
+            // Note: Stream will use tunnels from this pool, hop count will be logged when actual tunnel is selected
+            FT_LOG_DEBUG("ConnectionUtils", "Stream will use tunnels from pool associated with destination");
+        }
+    }
+    
     return TransferResult<std::shared_ptr<stream::Stream>>::Success(std::move(stream));
 }
 

@@ -1582,6 +1582,9 @@ namespace stream
 				ResetWindowSize ();
 //				m_TunnelsChangeSequenceNumber = m_SequenceNumber; // should be determined more precisely
 			}
+			
+			// Log actual hop count being used for verification
+			LogPrint (eLogInfo, "Streaming: Using outbound tunnel with ", m_CurrentOutboundTunnel->GetNumHops(), " hops for sSID=", m_SendStreamID);
 
 			std::vector<i2p::tunnel::TunnelMessageBlock> msgs;
 			for (const auto& it: packets)
