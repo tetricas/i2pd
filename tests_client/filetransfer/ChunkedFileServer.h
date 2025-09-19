@@ -116,6 +116,13 @@ private:
     size_t sendMessageOnStream(std::shared_ptr<stream::Stream> stream, const std::string& message);
     
     /**
+     * @brief Try to load file from disk if not in registry
+     * @param filename File to load
+     * @return True if successfully loaded
+     */
+    bool tryLoadFileFromDisk(const std::string& filename);
+    
+    /**
      * @brief Send chunk data on stream
      * @param stream Stream to write to
      * @param chunkData Raw chunk bytes

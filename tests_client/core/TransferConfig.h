@@ -16,7 +16,7 @@ class TransferConfig {
 public:
     // Network and connection timeouts
     static int getConnectionTimeout() {
-        return 20000; // 20s default
+        return 30000; // 30s default
     }
     
     static int getLeaseSetTimeout() {

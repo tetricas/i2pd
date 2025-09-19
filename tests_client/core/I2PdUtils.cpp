@@ -74,20 +74,29 @@ void I2PdUtils::stopCore()
     log::Logger().Stop();
 }
 
-std::shared_ptr<client::ClientDestination> I2PdUtils::createDestination(const bool isPublic)
+std::shared_ptr<client::ClientDestination> I2PdUtils::createDestination(const bool isPublic, const int hops)
 {
     const auto keys = data::PrivateKeys::CreateRandomKeys(data::SIGNING_KEY_TYPE_EDDSA_SHA512_ED25519);
     
-    auto tunnelParams = std::map<std::string, std::string>{
-            {"inbound.length", "1"}, {"outbound.length", "1"},
-            {"inbound.lengthVariance", "0"}, {"outbound.lengthVariance", "0"},
-            {"inbound.quantity", "3"}, {"outbound.quantity", "3"},
-            {"i2cp.leaseSetEncType", "0"}
+    // Default tunnel parameters
+    auto params = std::map<std::string, std::string>{
+                {"inbound.length", std::to_string(hops)},
+                {"outbound.length", std::to_string(hops)},
+                {"inbound.quantity", std::to_string(hops+1)},
+                {"outbound.quantity", std::to_string(hops+1)},
+                {"i2cp.leaseSetEncType", "0"}
     };
-    tunnelParams["i2cp.dontPublishLeaseSet"] = isPublic ? "false" : "true";
+    params["i2cp.dontPublishLeaseSet"] = isPublic ? "false" : "true";
     
-    auto destination = client::context.CreateNewLocalDestination(keys, isPublic, &tunnelParams);
+    auto destination = client::context.CreateNewLocalDestination(keys, isPublic, &params);
     destination->Start();
+    
+    // Log configured hop count for verification
+    const auto inboundLength = params.find("inbound.length");
+    const auto outboundLength = params.find("outbound.length");
+    if (inboundLength != params.end() && outboundLength != params.end()) {
+        FT_LOG_INFO("I2PdUtils", "Created destination with tunnel configuration: inbound=" << inboundLength->second << " hops, outbound=" << outboundLength->second << " hops");
+    }
     
     return destination;
 }
@@ -170,7 +179,15 @@ void I2PdUtils::initTrust()
 data::IdentHash I2PdUtils::parseBase32(const std::string& base32)
 {
     data::IdentHash serverHash;
-    if (!serverHash.FromBase32(base32))
+    
+    // Extract just the base32 part if full .b32.i2p address is provided
+    std::string cleanBase32 = base32;
+    size_t pos = base32.find(".b32.i2p");
+    if (pos != std::string::npos) {
+        cleanBase32 = base32.substr(0, pos);
+    }
+    
+    if (!serverHash.FromBase32(cleanBase32))
         throw std::runtime_error("Invalid base32 address: " + base32);
     return serverHash;
 }
@@ -195,6 +212,17 @@ void I2PdUtils::waitForLeaseSet(const data::IdentHash& identHash, const int time
     for (int i = 0; i < max_checks && !data::netdb.FindLeaseSet(identHash); ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(check_interval_ms));
     }
+}
+
+void I2PdUtils::configureExploratoryTunnels(int hopCount)
+{
+    // Update the config singleton to set exploratory tunnel lengths and quantities
+    config::SetOption("exploratory.inbound.length", std::to_string(hopCount));
+    config::SetOption("exploratory.outbound.length", std::to_string(hopCount));
+    config::SetOption("exploratory.inbound.quantity", std::to_string(hopCount + 1));
+    config::SetOption("exploratory.outbound.quantity", std::to_string(hopCount + 1));
+    
+    FT_LOG_INFO("I2PdUtils", "Configured exploratory tunnels: " << hopCount << " hops (quantity: " << (hopCount + 1) << ")");
 }
 
 } // namespace i2p::embed

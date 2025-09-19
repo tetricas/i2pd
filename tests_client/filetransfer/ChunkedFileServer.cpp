@@ -217,8 +217,15 @@ std::string ChunkedFileServer::handleFileRequest(const std::string& payload)
         
         auto it = m_fileMetadata.find(filename);
         if (it == m_fileMetadata.end()) {
-            LogPrint(eLogWarning, "ChunkedFileServer: File not found: ", filename);
-            return createErrorResponse(ErrorCode::FILE_NOT_FOUND, "File not found: " + filename);
+            // Try to load file from disk if not in registry
+            if (tryLoadFileFromDisk(filename)) {
+                it = m_fileMetadata.find(filename);
+            }
+            
+            if (it == m_fileMetadata.end()) {
+                LogPrint(eLogWarning, "ChunkedFileServer: File not found: ", filename);
+                return createErrorResponse(ErrorCode::FILE_NOT_FOUND, "File not found: " + filename);
+            }
         }
         
         const auto& metadata = it->second;
@@ -537,6 +544,57 @@ size_t ChunkedFileServer::sendChunkOnStream(std::shared_ptr<stream::Stream> stre
     } catch (const std::exception& e) {
         LogPrint(eLogError, "ChunkedFileServer: Exception sending chunk on stream: ", e.what());
         return 0;
+    }
+}
+
+bool ChunkedFileServer::tryLoadFileFromDisk(const std::string& filename) 
+{
+    try {
+        LogPrint(eLogInfo, "ChunkedFileServer: Attempting to load file from disk: ", filename);
+        
+        // Construct full path to input directory
+        std::string fullPath = "../../data/input/" + filename;
+        LogPrint(eLogInfo, "ChunkedFileServer: Trying to load file at path: ", fullPath);
+        
+        // Try to open the file
+        std::ifstream file(fullPath, std::ios::binary | std::ios::ate);
+        if (!file.is_open()) {
+            LogPrint(eLogError, "ChunkedFileServer: Could not open file: ", fullPath);
+            return false;
+        }
+        
+        // Get file size
+        std::streamsize size = file.tellg();
+        file.seekg(0, std::ios::beg);
+        
+        if (size <= 0 || size > 1024 * 1024 * 1024) { // Limit to 1GB
+            LogPrint(eLogWarning, "ChunkedFileServer: File size invalid or too large: ", size, " bytes");
+            return false;
+        }
+        
+        // Read file data
+        std::vector<uint8_t> data(size);
+        if (!file.read(reinterpret_cast<char*>(data.data()), size)) {
+            LogPrint(eLogWarning, "ChunkedFileServer: Failed to read file data: ", filename);
+            return false;
+        }
+        
+        // Add to server registry (extract just the filename for registry)
+        std::string registryName = filename;
+        size_t lastSlash = filename.find_last_of("/\\");
+        if (lastSlash != std::string::npos) {
+            registryName = filename.substr(lastSlash + 1);
+        }
+        
+        addMockFile(registryName, data);
+        
+        LogPrint(eLogInfo, "ChunkedFileServer: Successfully loaded file: ", fullPath, 
+                 " as '", registryName, "' (", size, " bytes)");
+        return true;
+        
+    } catch (const std::exception& e) {
+        LogPrint(eLogError, "ChunkedFileServer: Exception loading file ", filename, ": ", e.what());
+        return false;
     }
 }
 

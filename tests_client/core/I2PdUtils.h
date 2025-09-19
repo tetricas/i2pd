@@ -36,10 +36,10 @@ public:
     /**
      * @brief Create a local destination with tunnel parameters
      * @param isPublic Whether destination should be publicly announced
-     * @param tunnelParams Tunnel configuration parameters
+     * @param hops (optional)
      * @return Created destination
      */
-    static std::shared_ptr<client::ClientDestination> createDestination(bool isPublic);
+    static std::shared_ptr<client::ClientDestination> createDestination(bool isPublic, int hops = 1);
     
     /**
      * @brief Verify NTCP2 is properly published in RouterInfo
@@ -75,6 +75,12 @@ public:
      */
     static void waitForLeaseSet(const data::IdentHash& identHash,
                                 int timeout_ms = 20000);
+    
+    /**
+     * @brief Configure exploratory tunnel hop count
+     * @param hopCount Number of hops for exploratory tunnels
+     */
+    static void configureExploratoryTunnels(int hopCount);
 };
 
 } // namespace i2p::embed
