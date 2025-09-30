@@ -120,7 +120,7 @@ int runServer(int argc, char* argv[]) {
         i2p::embed::I2PdUtils::initNode("chunked-server", dataDir, configPath);
         
         // Configure exploratory tunnels with specified hop count
-        //i2p::embed::I2PdUtils::configureExploratoryTunnels(hopCount);
+        i2p::embed::I2PdUtils::configureExploratoryTunnels(hopCount);
         
         i2p::embed::I2PdUtils::startCore();
         
@@ -291,7 +291,7 @@ int runClient(int argc, char* argv[]) {
         i2p::embed::I2PdUtils::initNode("chunked-client", dataDir, configPath);
         
         // Configure exploratory tunnels with specified hop count
-        //i2p::embed::I2PdUtils::configureExploratoryTunnels(hopCount);
+        i2p::embed::I2PdUtils::configureExploratoryTunnels(hopCount);
         
         i2p::embed::I2PdUtils::startCore();
         
