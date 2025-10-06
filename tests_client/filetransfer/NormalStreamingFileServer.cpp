@@ -38,7 +38,7 @@ void NormalStreamingFileServer::addMockFile(const std::string& filename, const s
     m_fileMetadata[filename] = metadata;
     
     LogPrint(eLogInfo, "NormalStreamingFileServer: Added file '", filename, "' (", data.size(), 
-             " bytes, ", metadata.chunkCount, " chunks)");
+             " bytes, ", static_cast<uint32_t>(metadata.chunkCount), " chunks)");
 }
 
 void NormalStreamingFileServer::generateMockFile(const std::string& filename, size_t size, const std::string& seed)
@@ -193,7 +193,7 @@ std::string NormalStreamingFileServer::handleBinaryFileRequest(const std::string
     auto serialized = BinaryProtocolUtils::serializeMetadata(metadata);
     std::string response(reinterpret_cast<const char*>(serialized.data()), serialized.size());
     
-    LogPrint(eLogInfo, "NormalStreamingFileServer: Sent metadata for ", filename, " (", metadata.totalSize, " bytes)");
+    LogPrint(eLogInfo, "NormalStreamingFileServer: Sent metadata for ", filename, " (", static_cast<uint64_t>(metadata.totalSize), " bytes)");
     return response;
 }
 

@@ -50,8 +50,8 @@ IFileTransferClient::TransferResult NormalStreamingFileClient::downloadFile(
             return result;
         }
         
-        LogPrint(eLogInfo, "NormalStreamingFileClient: Metadata received - size=", metadata.totalSize, 
-                 " chunks=", metadata.chunkCount);
+        LogPrint(eLogInfo, "NormalStreamingFileClient: Metadata received - size=", static_cast<uint64_t>(metadata.totalSize), 
+                 " chunks=", static_cast<uint32_t>(metadata.chunkCount));
         
         // Step 2: Download file using streaming chunks
         result.stats.startTime = std::chrono::steady_clock::now();

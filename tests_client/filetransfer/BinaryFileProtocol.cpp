@@ -34,8 +34,8 @@ BinaryFileMetadata BinaryProtocolUtils::createMetadata(const std::string& filena
     std::memcpy(metadata.filename, filename.c_str(), nameLen);
     metadata.filename[nameLen] = '\0';
     
-    LogPrint(eLogInfo, "BinaryProtocolUtils: Created metadata - size=", metadata.totalSize, 
-             " chunks=", metadata.chunkCount, " chunkSize=", metadata.chunkSize);
+    LogPrint(eLogInfo, "BinaryProtocolUtils: Created metadata - size=", static_cast<uint64_t>(metadata.totalSize), 
+             " chunks=", static_cast<uint32_t>(metadata.chunkCount), " chunkSize=", static_cast<uint32_t>(metadata.chunkSize));
     
     return metadata;
 }
@@ -99,8 +99,8 @@ bool BinaryProtocolUtils::parseMetadata(const uint8_t* data, size_t dataSize, Bi
         return false;
     }
     
-    LogPrint(eLogInfo, "BinaryProtocolUtils: Parsed metadata - size=", metadata.totalSize,
-             " chunks=", metadata.chunkCount, " filename=", metadata.filename);
+    LogPrint(eLogInfo, "BinaryProtocolUtils: Parsed metadata - size=", static_cast<uint64_t>(metadata.totalSize),
+             " chunks=", static_cast<uint32_t>(metadata.chunkCount), " filename=", metadata.filename);
     
     return true;
 }
