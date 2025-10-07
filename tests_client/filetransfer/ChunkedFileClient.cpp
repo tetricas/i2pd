@@ -206,7 +206,7 @@ void ChunkedFileClient::receiveFileOnStream(
             
             auto chunkStart = std::chrono::steady_clock::now();
             
-            FT_LOG_DEBUG("ChunkedFileClient", "Reading chunk header for chunk " << chunkIndex << " (received " << result.data.size() << "/" << metadata.totalSize << " bytes so far)");
+            FT_LOG_DEBUG_IF_ENABLED("ChunkedFileClient", "Reading chunk header for chunk " << chunkIndex << " (received " << result.data.size() << "/" << metadata.totalSize << " bytes so far)");
             
             // Read chunk header: [4 bytes chunk_index][4 bytes chunk_size]
             std::vector<uint8_t> header = readChunkFromStream(stream, 8, i2p::filetransfer::TransferConfig::getChunkTimeout());
@@ -221,7 +221,7 @@ void ChunkedFileClient::receiveFileOnStream(
             uint32_t receivedIndex = header[0] | (header[1] << 8) | (header[2] << 16) | (header[3] << 24);
             uint32_t chunkSize = header[4] | (header[5] << 8) | (header[6] << 16) | (header[7] << 24);
             
-            FT_LOG_DEBUG("ChunkedFileClient", "Chunk header - index=" << receivedIndex << ", size=" << chunkSize);
+            FT_LOG_DEBUG_IF_ENABLED("ChunkedFileClient", "Chunk header - index=" << receivedIndex << ", size=" << chunkSize);
             
             if (receivedIndex != chunkIndex) {
                 result.error = "Chunk index mismatch - expected " + std::to_string(chunkIndex) + 
@@ -250,7 +250,7 @@ void ChunkedFileClient::receiveFileOnStream(
             result.stats.chunkTimes.push_back(chunkTime);
             result.stats.chunksReceived++;
             
-            FT_LOG_DEBUG("ChunkedFileClient", "Chunk " << (chunkIndex + 1) << " received (" << chunkSize << " bytes)");
+            FT_LOG_DEBUG_IF_ENABLED("ChunkedFileClient", "Chunk " << (chunkIndex + 1) << " received (" << chunkSize << " bytes)");
             
             chunkIndex++;
         }
@@ -313,7 +313,7 @@ std::vector<uint8_t> ChunkedFileClient::readChunkFromStream(std::shared_ptr<stre
         
         if (bytesRead > 0) {
             totalBytesRead += bytesRead;
-            FT_LOG_DEBUG("ChunkedFileClient", "Read " << bytesRead << " bytes (" << totalBytesRead << "/" << expectedSize << ")");
+            FT_LOG_DEBUG_IF_ENABLED("ChunkedFileClient", "Read " << bytesRead << " bytes (" << totalBytesRead << "/" << expectedSize << ")");
         } else {
             // No data received, check if we should continue waiting
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -327,12 +327,12 @@ std::vector<uint8_t> ChunkedFileClient::readChunkFromStream(std::shared_ptr<stre
             
             // Brief pause before retry, but be more persistent
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            FT_LOG_DEBUG("ChunkedFileClient", "Waiting for more data, " << totalBytesRead << "/" << expectedSize << " bytes, " << remainingTimeout << "ms remaining");
+            FT_LOG_DEBUG_IF_ENABLED("ChunkedFileClient", "Waiting for more data, " << totalBytesRead << "/" << expectedSize << " bytes, " << remainingTimeout << "ms remaining");
         }
     }
     
     if (totalBytesRead == expectedSize) {
-        FT_LOG_DEBUG("ChunkedFileClient", "Successfully read complete chunk: " << totalBytesRead << " bytes");
+        FT_LOG_DEBUG_IF_ENABLED("ChunkedFileClient", "Successfully read complete chunk: " << totalBytesRead << " bytes");
         return buffer;
     } else {
         FT_LOG_ERROR("ChunkedFileClient", "Failed to read complete chunk - expected " << expectedSize << ", got " << totalBytesRead << " bytes");
@@ -361,7 +361,7 @@ FileMetadata ChunkedFileClient::parseMetadata(const std::string& payload)
         }
     }
     
-    FT_LOG_DEBUG("ChunkedFileClient", "Parsed metadata - filename=" << metadata.filename << ", size=" << metadata.totalSize << " (chunks will be discovered)");
+    FT_LOG_DEBUG_IF_ENABLED("ChunkedFileClient", "Parsed metadata - filename=" << metadata.filename << ", size=" << metadata.totalSize << " (chunks will be discovered)");
     
     return metadata;
 }
@@ -386,7 +386,7 @@ std::string ChunkedFileClient::sendMessage(embed::SimpleStreamClient* client,
         // Handle potential "V" prefix from SimpleSend/SimpleReceive protocol
         size_t startPos = 0;
         if (response.size() > 0 && response[0] == 'V') {
-            FT_LOG_DEBUG("ChunkedFileClient", "Stripping 'V' prefix from response");
+            FT_LOG_DEBUG_IF_ENABLED("ChunkedFileClient", "Stripping 'V' prefix from response");
             startPos = 1;
         }
         
@@ -397,7 +397,7 @@ std::string ChunkedFileClient::sendMessage(embed::SimpleStreamClient* client,
         }
         
         std::string responsePayload = response.substr(colonPos + 1);
-        FT_LOG_DEBUG("ChunkedFileClient", "Extracted payload: [" << responsePayload << "]");
+        FT_LOG_DEBUG_IF_ENABLED("ChunkedFileClient", "Extracted payload: [" << responsePayload << "]");
         return responsePayload;
         
     } catch (const std::exception& e) {
