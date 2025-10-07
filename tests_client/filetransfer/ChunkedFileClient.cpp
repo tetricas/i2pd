@@ -206,7 +206,7 @@ void ChunkedFileClient::receiveFileOnStream(
             
             auto chunkStart = std::chrono::steady_clock::now();
             
-            FT_LOG_INFO("ChunkedFileClient", "Reading chunk header for chunk " << chunkIndex << " (received " << result.data.size() << "/" << metadata.totalSize << " bytes so far)");
+            FT_LOG_DEBUG("ChunkedFileClient", "Reading chunk header for chunk " << chunkIndex << " (received " << result.data.size() << "/" << metadata.totalSize << " bytes so far)");
             
             // Read chunk header: [4 bytes chunk_index][4 bytes chunk_size]
             std::vector<uint8_t> header = readChunkFromStream(stream, 8, i2p::filetransfer::TransferConfig::getChunkTimeout());
@@ -221,7 +221,7 @@ void ChunkedFileClient::receiveFileOnStream(
             uint32_t receivedIndex = header[0] | (header[1] << 8) | (header[2] << 16) | (header[3] << 24);
             uint32_t chunkSize = header[4] | (header[5] << 8) | (header[6] << 16) | (header[7] << 24);
             
-            FT_LOG_INFO("ChunkedFileClient", "Chunk header - index=" << receivedIndex << ", size=" << chunkSize);
+            FT_LOG_DEBUG("ChunkedFileClient", "Chunk header - index=" << receivedIndex << ", size=" << chunkSize);
             
             if (receivedIndex != chunkIndex) {
                 result.error = "Chunk index mismatch - expected " + std::to_string(chunkIndex) + 
@@ -250,7 +250,7 @@ void ChunkedFileClient::receiveFileOnStream(
             result.stats.chunkTimes.push_back(chunkTime);
             result.stats.chunksReceived++;
             
-            FT_LOG_INFO("ChunkedFileClient", "Chunk " << (chunkIndex + 1) << " received (" << chunkSize << " bytes)");
+            FT_LOG_DEBUG("ChunkedFileClient", "Chunk " << (chunkIndex + 1) << " received (" << chunkSize << " bytes)");
             
             chunkIndex++;
         }
@@ -313,7 +313,7 @@ std::vector<uint8_t> ChunkedFileClient::readChunkFromStream(std::shared_ptr<stre
         
         if (bytesRead > 0) {
             totalBytesRead += bytesRead;
-            FT_LOG_INFO("ChunkedFileClient", "Read " << bytesRead << " bytes (" << totalBytesRead << "/" << expectedSize << ")");
+            FT_LOG_DEBUG("ChunkedFileClient", "Read " << bytesRead << " bytes (" << totalBytesRead << "/" << expectedSize << ")");
         } else {
             // No data received, check if we should continue waiting
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(

@@ -1584,7 +1584,7 @@ namespace stream
 			}
 			
 			// Log actual hop count being used for verification
-			LogPrint (eLogInfo, "Streaming: Using outbound tunnel with ", m_CurrentOutboundTunnel->GetNumHops(), " hops for sSID=", m_SendStreamID);
+			LogPrint (eLogDebug, "Streaming: Using outbound tunnel with ", m_CurrentOutboundTunnel->GetNumHops(), " hops for sSID=", m_SendStreamID);
 
 			std::vector<i2p::tunnel::TunnelMessageBlock> msgs;
 			for (const auto& it: packets)
@@ -2128,18 +2128,17 @@ namespace stream
 	{
 		uint32_t sendStreamID = packet->GetSendStreamID ();
 		uint32_t recvStreamID = packet->GetReceiveStreamID();
-		LogPrint (eLogInfo, "Streaming: HandleNextPacket sSID=", sendStreamID, " rSID=", recvStreamID,
+		LogPrint (eLogDebug, "Streaming: HandleNextPacket sSID=", sendStreamID, " rSID=", recvStreamID,
 			" StreamingDestination=", this);
 		if (sendStreamID)
 		{
 			if (packet->IsSimpleMessage ()) {
 				// simple message
-				LogPrint (eLogInfo, "Streaming: IsSimpleMessage");
 				const auto payloadLen = static_cast<int>(packet->len) - (packet->GetPayload () - packet->buf);
 				if (payloadLen > 0)
 				{
 					std::string payload (packet->GetPayload (), packet->GetPayload () + payloadLen);
-					LogPrint (eLogInfo, "Streaming: Simple message payload: ", payload);
+					LogPrint (eLogDebug, "Streaming: Simple message payload: ", payload);
 				}
 				if (const auto it = m_Streams.find (sendStreamID); it != m_Streams.end ())
 					m_LastStream = it->second;
@@ -2150,7 +2149,7 @@ namespace stream
 					for (const auto id: m_Streams | std::views::keys) {
 						streams += std::to_string(id) + ", ";
 					}
-					LogPrint (eLogInfo, "Streaming: Can't find stream in ", streams);
+					LogPrint (eLogDebug, "Streaming: Can't find stream in ", streams);
 				}
 
 				m_LastStream->HandleSimpleMessage (packet);
