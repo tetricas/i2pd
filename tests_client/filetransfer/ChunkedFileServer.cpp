@@ -466,6 +466,7 @@ bool ChunkedFileServer::sendFileOnStream(std::shared_ptr<stream::Stream> stream,
         LogPrint(eLogInfo, "ChunkedFileServer: Metadata sent (", metadataSent, " bytes), sending chunks with headers...");
         
         // Step 2: Send all chunks sequentially
+        int lastThreshold = 0;
         for (size_t chunkIndex = 0; chunkIndex < metadata.chunkCount; ++chunkIndex) {
             if (!m_running.load()) {
                 LogPrint(eLogInfo, "ChunkedFileServer: Transfer cancelled");
@@ -505,9 +506,16 @@ bool ChunkedFileServer::sendFileOnStream(std::shared_ptr<stream::Stream> stream,
                          " - sent ", chunkSent, "/", chunkPacket.size(), " bytes");
                 return false;
             }
-            
-            LogPrint(eLogInfo, "ChunkedFileServer: Sent chunk ", chunkIndex + 1, "/",
-                     metadata.chunkCount, " (", chunkSize, " data bytes + 8 header bytes)");
+
+
+            double progress = 100.0 * (chunkIndex + 1) / metadata.chunkCount;
+            if (progress >= lastThreshold + 10)
+            {
+                lastThreshold += 10;
+                LogPrint(eLogInfo, "ChunkedFileServer: Sent chunk ", chunkIndex + 1, "/",
+                metadata.chunkCount, " (", chunkSize, " data bytes + 8 header bytes)");
+                        std::cout << "Progress: " << lastThreshold << "%\n";
+            }
         }
         
         LogPrint(eLogInfo, "ChunkedFileServer: All chunks sent successfully");

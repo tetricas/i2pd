@@ -198,6 +198,7 @@ void ChunkedFileClient::receiveFileOnStream(
         
         // Step 2: Read chunks until we have all the data
         size_t chunkIndex = 0;
+        int lastLoggedPercent = -1;
         while (result.data.size() < metadata.totalSize) {
             if (!m_transferActive.load()) {
                 result.error = "Transfer cancelled";
@@ -205,11 +206,14 @@ void ChunkedFileClient::receiveFileOnStream(
             }
             
             auto chunkStart = std::chrono::steady_clock::now();
-            
-            FT_LOG_DEBUG_IF_ENABLED("ChunkedFileClient", "Reading chunk header for chunk " << chunkIndex << " (received " << result.data.size() << "/" << metadata.totalSize << " bytes so far)");
-            
+
+            int currentPercent = static_cast<int>((100.0 * result.data.size()) / metadata.totalSize);
+            if (currentPercent / 10 > lastLoggedPercent / 10) {
+                lastLoggedPercent = currentPercent;
+                FT_LOG_INFO("ChunkedFileClient", "Reading chunk header for chunk " << chunkIndex << " (received " << result.data.size() << "/" << metadata.totalSize << " bytes so far)");
+            }
             // Read chunk header: [4 bytes chunk_index][4 bytes chunk_size]
-            std::vector<uint8_t> header = readChunkFromStream(stream, 8, i2p::filetransfer::TransferConfig::getChunkTimeout());
+            std::vector<uint8_t> header = readChunkFromStream(stream, 8, TransferConfig::getChunkTimeout());
             if (header.size() != 8) {
                 result.error = "Failed to receive chunk header " + std::to_string(chunkIndex) + 
                               " - got " + std::to_string(header.size()) + "/8 bytes";
