@@ -22,6 +22,7 @@ namespace i2p::embed
 
 void I2PdUtils::initNode(const std::string& mode, const std::string& datadir, const std::string& config)
 {
+    config::Init();
     fs::SetAppName("embed-" + mode);
     fs::DetectDataDir(datadir);
     config::ParseConfig(config);

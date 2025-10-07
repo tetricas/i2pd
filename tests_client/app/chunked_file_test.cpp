@@ -116,7 +116,6 @@ int runServer(int argc, char* argv[]) {
     
     try {
         std::cout << "Initializing i2pd node...\n";
-        i2p::config::Init();
         i2p::embed::I2PdUtils::initNode("chunked-server", dataDir, configPath);
         
         // Configure exploratory tunnels with specified hop count
@@ -287,7 +286,6 @@ int runClient(int argc, char* argv[]) {
     
     try {
         std::cout << "Initializing i2pd node...\n";
-        i2p::config::Init();
         i2p::embed::I2PdUtils::initNode("chunked-client", dataDir, configPath);
         
         // Configure exploratory tunnels with specified hop count
