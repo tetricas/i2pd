@@ -4,6 +4,7 @@
 #include "../core/FileTransferLogging.h"
 #include "../core/TransferConfig.h"
 #include "../core/ConnectionUtils.h"
+#include "../core/UniversalFlowControl.h"
 #include "Log.h"
 #include <sstream>
 using namespace std::chrono_literals;
@@ -256,6 +257,9 @@ void ChunkedFileClient::receiveFileOnStream(
             
             FT_LOG_DEBUG_IF_ENABLED("ChunkedFileClient", "Chunk " << (chunkIndex + 1) << " received (" << chunkSize << " bytes)");
             
+            // Universal flow control - helps prevent overwhelming the sender
+            enforceUniversalFlowControl();
+            
             chunkIndex++;
         }
         
@@ -427,6 +431,12 @@ bool ChunkedFileClient::verifyData(const std::vector<uint8_t>& data, const FileM
     
     FT_LOG_INFO("ChunkedFileClient", "Data verification successful");
     return true;
+}
+
+void ChunkedFileClient::enforceUniversalFlowControl()
+{
+    // Use the universal flow control system that adapts to network conditions
+    UniversalFlowControl::EnforceFlowControl();
 }
 
 } // namespace i2p::filetransfer

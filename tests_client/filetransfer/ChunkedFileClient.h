@@ -110,6 +110,11 @@ private:
      */
     bool verifyData(const std::vector<uint8_t>& data, 
                    const FileMetadata& metadata) const;
+    
+    /**
+     * @brief Enforce universal flow control (prevents overwhelming sender)
+     */
+    void enforceUniversalFlowControl();
 };
 
 } // namespace i2p::filetransfer

@@ -3,6 +3,7 @@
 #include "../core/I2PdUtils.h"
 #include "../core/FileTransferLogging.h"
 #include "../core/TransferConfig.h"
+#include "../core/UniversalFlowControl.h"
 #include "Log.h"
 #include <sstream>
 #include <algorithm>
@@ -548,11 +549,21 @@ size_t ChunkedFileServer::sendChunkOnStream(std::shared_ptr<stream::Stream> stre
     try {
         size_t sent = stream->Send(chunkData.data(), chunkData.size());
         LogPrint(eLogDebug, "ChunkedFileServer: Sent chunk on stream: ", sent, " bytes");
+        
+        // Universal flow control - always present, works on all networks
+        enforceUniversalFlowControl();
+        
         return sent;
     } catch (const std::exception& e) {
         LogPrint(eLogError, "ChunkedFileServer: Exception sending chunk on stream: ", e.what());
         return 0;
     }
+}
+
+void ChunkedFileServer::enforceUniversalFlowControl()
+{
+    // Use the universal flow control system that adapts to network conditions
+    UniversalFlowControl::EnforceFlowControl();
 }
 
 bool ChunkedFileServer::tryLoadFileFromDisk(const std::string& filename) 

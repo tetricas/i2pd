@@ -137,6 +137,11 @@ private:
      */
     std::string parseFilenameFromPayload(const std::string& payload);
     
+    /**
+     * @brief Enforce universal flow control (prevents queue overflow on all networks)
+     */
+    void enforceUniversalFlowControl();
+    
     // Legacy methods (for compatibility)
     std::string handleFileRequest(const std::string& payload);
     std::string handleChunkRequest(const std::string& payload);  

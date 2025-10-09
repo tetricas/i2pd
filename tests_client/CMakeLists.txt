@@ -16,6 +16,8 @@ set(CORE_SOURCES
         core/ConnectionUtils.cpp
         core/ErrorHandling.cpp
         core/OperationContext.cpp
+        core/NetworkDetector.cpp
+        core/UniversalFlowControl.cpp
 )
 
 # Transport layer

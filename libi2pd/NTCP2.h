@@ -45,7 +45,7 @@ namespace transport
 	const int NTCP2_ROUTERINFO_RESEND_INTERVAL_THRESHOLD = 25*60; // 25 minuntes
 
 	const int NTCP2_CLOCK_SKEW = 60; // in seconds
-	const int NTCP2_MAX_OUTGOING_QUEUE_SIZE = 500; // how many messages we can queue up
+	const int NTCP2_MAX_OUTGOING_QUEUE_SIZE = 5000; // universal queue size for all networks
 
 	enum NTCP2BlockType
 	{
