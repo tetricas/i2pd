@@ -99,9 +99,6 @@ IFileTransferClient::TransferResult NormalStreamingFileClient::downloadFile(
             result.stats.chunksTotal = metadata.chunkCount;
             result.stats.verified = true;
             
-            // Clear checkpoint on success
-            m_recoveryGuard.reset();
-            
             LogPrint(eLogInfo, "NormalStreamingFileClient: Download successful - ", result.data.size(), 
                      " bytes in ", result.stats.getTransferTime().count(), " ms");
             LogPrint(eLogInfo, "NormalStreamingFileClient: Throughput: ", 
@@ -114,12 +111,19 @@ IFileTransferClient::TransferResult NormalStreamingFileClient::downloadFile(
             checkpoint.bytesReceived = fileData.size();
             checkpoint.partialData = std::move(fileData);
             checkpoint.lastUpdate = std::chrono::steady_clock::now();
-            m_recoveryGuard->saveCheckpoint(checkpoint);
+            if (m_recoveryGuard) {
+                m_recoveryGuard->saveCheckpoint(checkpoint);
+            }
         }
         
     } catch (const std::exception& e) {
         result.error = "Download exception: " + std::string(e.what());
         LogPrint(eLogError, "NormalStreamingFileClient: Exception: ", e.what());
+    }
+    
+    // Always clear recovery guard to prevent dangling callback references
+    if (m_recoveryGuard) {
+        m_recoveryGuard.reset();
     }
     
     m_lastStatus = result.success ? "Download completed successfully" : result.error;

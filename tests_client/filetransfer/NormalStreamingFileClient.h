@@ -28,7 +28,12 @@ private:
     
 public:
     explicit NormalStreamingFileClient(std::shared_ptr<client::ClientDestination> destination);
-    ~NormalStreamingFileClient() override = default;
+    ~NormalStreamingFileClient() override {
+        // Ensure recovery guard is properly cleaned up
+        if (m_recoveryGuard) {
+            m_recoveryGuard.reset();
+        }
+    }
     
     // IFileTransferClient interface
     TransferResult downloadFile(const std::string& serverB32, 

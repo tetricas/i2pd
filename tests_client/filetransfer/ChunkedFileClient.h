@@ -44,7 +44,12 @@ private:
     
 public:
     explicit ChunkedFileClient(std::shared_ptr<client::ClientDestination> destination);
-    ~ChunkedFileClient() = default;
+    ~ChunkedFileClient() {
+        // Ensure recovery guard is properly cleaned up
+        if (m_recoveryGuard) {
+            m_recoveryGuard.reset();
+        }
+    }
     
     /**
      * @brief Request and download a file from server

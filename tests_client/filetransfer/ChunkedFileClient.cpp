@@ -152,6 +152,11 @@ ChunkedFileClient::TransferResult ChunkedFileClient::requestFile(
         FT_LOG_ERROR("ChunkedFileClient", "Exception: " << e.what());
     }
     
+    // Always clear recovery guard to prevent dangling callback references
+    if (m_recoveryGuard) {
+        m_recoveryGuard.reset();
+    }
+    
     // Cleanup
     {
         std::lock_guard<std::mutex> lock(m_incomingStreamsMutex);
