@@ -4,6 +4,8 @@
 #include "FileTransferProtocol.h"
 #include "Destination.h"
 #include "Streaming.h"
+#include "../core/TransferRecovery.h"
+#include "../core/StreamStabilityMonitor.h"
 #include <memory>
 #include <string>
 #include <vector>
@@ -35,6 +37,10 @@ private:
     std::condition_variable m_streamCondition;
     std::shared_ptr<stream::Stream> m_currentResponseStream;
     bool m_expectingResponse = false;
+    
+    // Recovery system
+    std::unique_ptr<i2p::core::TransferRecoveryGuard> m_recoveryGuard;
+    std::atomic<bool> m_recoveryInProgress{false};
     
 public:
     explicit ChunkedFileClient(std::shared_ptr<client::ClientDestination> destination);
@@ -115,6 +121,24 @@ private:
      * @brief Enforce universal flow control (prevents overwhelming sender)
      */
     void enforceUniversalFlowControl();
+    
+    /**
+     * @brief Handle transfer recovery
+     */
+    bool handleRecovery(const i2p::core::TransferCheckpoint& checkpoint, 
+                       i2p::core::RecoveryStrategy strategy);
+    
+    /**
+     * @brief Resume transfer from checkpoint  
+     */
+    TransferResult resumeTransfer(const i2p::core::TransferCheckpoint& checkpoint, 
+                                 int timeout_ms);
+    
+    /**
+     * @brief Validate partial data for integrity
+     */
+    bool validatePartialData(const std::vector<uint8_t>& data, 
+                           size_t expectedSize) const;
 };
 
 } // namespace i2p::filetransfer

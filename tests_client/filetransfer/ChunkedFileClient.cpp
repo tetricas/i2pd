@@ -5,8 +5,11 @@
 #include "../core/TransferConfig.h"
 #include "../core/ConnectionUtils.h"
 #include "../core/UniversalFlowControl.h"
+#include "../core/StreamStabilityMonitor.h"
+#include "../core/TransferRecovery.h"
 #include "Log.h"
 #include <sstream>
+#include <iomanip>
 using namespace std::chrono_literals;
 
 namespace i2p::filetransfer
@@ -47,11 +50,34 @@ ChunkedFileClient::TransferResult ChunkedFileClient::requestFile(
         return result;
     }
     
+    // Set up recovery system
+    std::string transferId = serverB32 + ":" + filename;
+    m_recoveryGuard = std::make_unique<i2p::core::TransferRecoveryGuard>(
+        transferId,
+        [this](const i2p::core::TransferCheckpoint& checkpoint, i2p::core::RecoveryStrategy strategy) {
+            return handleRecovery(checkpoint, strategy);
+        }
+    );
+    
+    // Try to load existing checkpoint
+    i2p::core::TransferCheckpoint checkpoint;
+    if (m_recoveryGuard->loadCheckpoint(checkpoint)) {
+        LogPrint(eLogInfo, "ChunkedFileClient: Resuming from checkpoint - ", 
+                 std::fixed, std::setprecision(1), checkpoint.getProgress() * 100, "% complete");
+        return resumeTransfer(checkpoint, timeout_ms);
+    }
+    
     m_transferActive.store(true);
     // Note: startTime will be set when actual data reception begins
     
+    // Initialize checkpoint
+    checkpoint.serverB32 = serverB32;
+    checkpoint.filename = filename;
+    checkpoint.lastUpdate = std::chrono::steady_clock::now();
+    checkpoint.attemptCount = 0;
+    
     try {
-        FT_LOG_INFO("ChunkedFileClient", "Starting file transfer for: " << filename << " using new stream architecture");
+        FT_LOG_INFO("ChunkedFileClient", "Starting fresh file transfer for: " << filename << " using new stream architecture");
         result.stats.initTime = std::chrono::steady_clock::now();
 
         // Step 1: Send file request via SimpleSend (lightweight)
@@ -104,7 +130,20 @@ ChunkedFileClient::TransferResult ChunkedFileClient::requestFile(
             result.stats.endTime = std::chrono::steady_clock::now();
             m_lastStatus = "Transfer completed successfully";
             
+            // Clear checkpoint on success
+            m_recoveryGuard.reset();
+            
             FT_LOG_INFO("ChunkedFileClient", "Transfer complete - " << result.stats.totalBytes << " bytes in " << result.stats.getTransferTime().count() << "ms, " << result.stats.getThroughputKBps() << " KB/s");
+        } else {
+            // Save checkpoint for recovery with validation
+            if (!result.data.empty() && validatePartialData(result.data, checkpoint.totalSize)) {
+                checkpoint.bytesReceived = result.data.size();
+                checkpoint.partialData = std::move(result.data);
+                checkpoint.lastUpdate = std::chrono::steady_clock::now();
+                m_recoveryGuard->saveCheckpoint(checkpoint);
+                LogPrint(eLogInfo, "ChunkedFileClient: Checkpoint saved for recovery - ", 
+                         checkpoint.bytesReceived, " bytes");
+            }
         }
         
     } catch (const std::exception& e) {
@@ -437,6 +476,98 @@ void ChunkedFileClient::enforceUniversalFlowControl()
 {
     // Use the universal flow control system that adapts to network conditions
     UniversalFlowControl::EnforceFlowControl();
+}
+
+bool ChunkedFileClient::handleRecovery(const i2p::core::TransferCheckpoint& checkpoint, 
+                                      i2p::core::RecoveryStrategy strategy) {
+    if (m_recoveryInProgress.exchange(true)) {
+        LogPrint(eLogWarning, "ChunkedFileClient: Recovery already in progress");
+        return false;
+    }
+    
+    LogPrint(eLogInfo, "ChunkedFileClient: Handling recovery for ", checkpoint.filename, 
+             " using strategy ", (int)strategy);
+    
+    bool success = false;
+    
+    try {
+        switch (strategy) {
+            case i2p::core::RecoveryStrategy::IMMEDIATE_RETRY:
+                success = requestFile(checkpoint.serverB32, checkpoint.filename, 30000).success;
+                break;
+                
+            case i2p::core::RecoveryStrategy::DELAYED_RETRY:
+                std::this_thread::sleep_for(std::chrono::seconds(5));
+                success = requestFile(checkpoint.serverB32, checkpoint.filename, 30000).success;
+                break;
+                
+            case i2p::core::RecoveryStrategy::CHECKPOINT_RESUME:
+                success = resumeTransfer(checkpoint, 30000).success;
+                break;
+                
+            default:
+                LogPrint(eLogWarning, "ChunkedFileClient: Unsupported recovery strategy");
+                break;
+        }
+    } catch (const std::exception& e) {
+        LogPrint(eLogError, "ChunkedFileClient: Recovery exception: ", e.what());
+    }
+    
+    m_recoveryInProgress = false;
+    return success;
+}
+
+ChunkedFileClient::TransferResult ChunkedFileClient::resumeTransfer(
+    const i2p::core::TransferCheckpoint& checkpoint, int timeout_ms) {
+    
+    TransferResult result;
+    result.success = false;
+    
+    if (!checkpoint.isValid()) {
+        result.error = "Invalid checkpoint";
+        return result;
+    }
+    
+    LogPrint(eLogInfo, "ChunkedFileClient: Resuming chunked transfer from ", 
+             checkpoint.bytesReceived, "/", checkpoint.totalSize, " bytes");
+    
+    // For chunked protocol, implement actual resume by chunk index
+    // TODO: Enhance protocol to support resume from specific chunk
+    LogPrint(eLogInfo, "ChunkedFileClient: Chunked protocol restart required for now");
+    
+    return requestFile(checkpoint.serverB32, checkpoint.filename, timeout_ms);
+}
+
+bool ChunkedFileClient::validatePartialData(const std::vector<uint8_t>& data, 
+                                          size_t expectedSize) const {
+    if (data.empty()) {
+        LogPrint(eLogWarning, "ChunkedFileClient: No data to validate");
+        return false;
+    }
+    
+    if (data.size() > expectedSize) {
+        LogPrint(eLogError, "ChunkedFileClient: Data size exceeds expected - got ", 
+                 data.size(), " expected ", expectedSize);
+        return false;
+    }
+    
+    // Check for obvious corruption patterns in chunks
+    bool hasNonZero = false;
+    for (size_t i = 0; i < std::min(data.size(), size_t(1024)); ++i) {
+        if (data[i] != 0) {
+            hasNonZero = true;
+            break;
+        }
+    }
+    
+    if (!hasNonZero) {
+        LogPrint(eLogWarning, "ChunkedFileClient: Data appears to be all zeros");
+        return false;
+    }
+    
+    LogPrint(eLogInfo, "ChunkedFileClient: Partial data validation passed - ", 
+             data.size(), " bytes");
+    return true;
 }
 
 } // namespace i2p::filetransfer
