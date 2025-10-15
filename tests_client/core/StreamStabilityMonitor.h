@@ -71,6 +71,9 @@ public:
     void setTunnelSwitchThreshold(int threshold) { m_tunnelSwitchThreshold = threshold; }
     void setActivityTimeout(int seconds) { m_activityTimeoutSec = seconds; }
     
+    // Cleanup (call before application shutdown)
+    void shutdown();
+    
 private:
     StreamStabilityMonitor() = default;
     

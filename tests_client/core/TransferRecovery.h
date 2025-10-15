@@ -74,6 +74,9 @@ public:
     // Stream association (for TransferRecoveryGuard)
     void associateStreamWithTransfer(StreamStabilityMonitor::StreamID streamId, const std::string& transferId);
     
+    // Cleanup (call before application shutdown)
+    void shutdown();
+    
 private:
     TransferRecovery();
     

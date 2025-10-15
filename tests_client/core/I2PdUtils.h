@@ -81,6 +81,11 @@ public:
      * @param hopCount Number of hops for exploratory tunnels
      */
     static void configureExploratoryTunnels(int hopCount);
+    
+    /**
+     * @brief Shutdown recovery systems before stopping core
+     */
+    static void shutdownRecoverySystems();
 };
 
 } // namespace i2p::embed

@@ -1,6 +1,8 @@
 #include "I2PdUtils.h"
 #include "FileTransferLogging.h"
 #include "TransferConfig.h"
+#include "TransferRecovery.h"
+#include "StreamStabilityMonitor.h"
 #include <iostream>
 #include <thread>
 #include <chrono>
@@ -224,6 +226,17 @@ void I2PdUtils::configureExploratoryTunnels(int hopCount)
     config::SetOption("exploratory.outbound.quantity", std::to_string(hopCount + 1));
     
     FT_LOG_INFO("I2PdUtils", "Configured exploratory tunnels: " << hopCount << " hops (quantity: " << (hopCount + 1) << ")");
+}
+
+void I2PdUtils::shutdownRecoverySystems()
+{
+    FT_LOG_INFO("I2PdUtils", "Shutting down recovery systems...");
+    
+    // Shutdown recovery systems in proper order to prevent static destruction issues
+    i2p::core::TransferRecovery::getInstance().shutdown();
+    i2p::core::StreamStabilityMonitor::getInstance().shutdown();
+    
+    FT_LOG_INFO("I2PdUtils", "Recovery systems shutdown complete");
 }
 
 } // namespace i2p::embed

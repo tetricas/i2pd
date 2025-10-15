@@ -200,6 +200,7 @@ int runServer(int argc, char* argv[]) {
         
         std::cout << "Server shutting down...\n";
         server->stop();
+        i2p::embed::I2PdUtils::shutdownRecoverySystems();
         i2p::embed::I2PdUtils::stopCore();
         
     } catch (const std::exception& e) {
@@ -337,6 +338,7 @@ int runClient(int argc, char* argv[]) {
         }
         
         FT_LOG_INFO("Client", "Client shutting down...");
+        i2p::embed::I2PdUtils::shutdownRecoverySystems();
         i2p::embed::I2PdUtils::stopCore();
         
         return result.success ? 0 : 1;

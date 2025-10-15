@@ -195,6 +195,19 @@ void TransferRecovery::associateStreamWithTransfer(StreamStabilityMonitor::Strea
     m_streamToTransfer[streamId] = transferId;
 }
 
+void TransferRecovery::shutdown() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    
+    LogPrint(eLogInfo, "TransferRecovery: Shutting down recovery system...");
+    
+    // Clear all active transfers and checkpoints
+    m_callbacks.clear();
+    m_checkpoints.clear();
+    m_streamToTransfer.clear();
+    
+    LogPrint(eLogInfo, "TransferRecovery: Recovery system shutdown complete");
+}
+
 // TransferRecoveryGuard Implementation
 
 TransferRecoveryGuard::TransferRecoveryGuard(const std::string& transferId, 

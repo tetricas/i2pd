@@ -119,6 +119,7 @@ int main(int argc, char** argv) {
         }
 
         // Clean shutdown
+        I2PdUtils::shutdownRecoverySystems();
         I2PdUtils::stopCore();
         std::cout << "Shutdown complete." << std::endl;
         return 0;
@@ -126,6 +127,7 @@ int main(int argc, char** argv) {
     } catch (const std::exception& e) {
         std::cerr << "FATAL: " << e.what() << std::endl;
         try {
+            I2PdUtils::shutdownRecoverySystems();
             I2PdUtils::stopCore();
         } catch (...) {}
         return 1;

@@ -164,6 +164,18 @@ void StreamStabilityMonitor::checkStreamHealth(StreamID streamId, StreamHealth& 
     }
 }
 
+void StreamStabilityMonitor::shutdown() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    
+    LogPrint(eLogInfo, "StreamStabilityMonitor: Shutting down monitoring system...");
+    
+    // Clear all monitored streams and callbacks
+    m_streams.clear();
+    m_failureCallback = nullptr;
+    
+    LogPrint(eLogInfo, "StreamStabilityMonitor: Monitoring system shutdown complete");
+}
+
 // StreamMonitorGuard Implementation
 
 StreamMonitorGuard::StreamMonitorGuard(StreamStabilityMonitor::StreamID streamId)
