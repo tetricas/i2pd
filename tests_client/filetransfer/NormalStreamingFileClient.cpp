@@ -1,9 +1,12 @@
 #include "NormalStreamingFileClient.h"
 #include "FileTransferProtocol.h"
+#include "../core/StreamStabilityMonitor.h"
+#include "../core/TransferRecovery.h"
 #include "Log.h"
 #include <algorithm>
 #include <thread>
 #include <chrono>
+#include <iomanip>
 
 namespace i2p::filetransfer
 {
@@ -38,7 +41,30 @@ IFileTransferClient::TransferResult NormalStreamingFileClient::downloadFile(
         return result;
     }
     
-    LogPrint(eLogInfo, "NormalStreamingFileClient: Starting download - ", filename);
+    // Set up recovery system
+    std::string transferId = serverB32 + ":" + filename;
+    m_recoveryGuard = std::make_unique<i2p::core::TransferRecoveryGuard>(
+        transferId,
+        [this](const i2p::core::TransferCheckpoint& checkpoint, i2p::core::RecoveryStrategy strategy) {
+            return handleRecovery(checkpoint, strategy);
+        }
+    );
+    
+    // Try to load existing checkpoint
+    i2p::core::TransferCheckpoint checkpoint;
+    if (m_recoveryGuard->loadCheckpoint(checkpoint)) {
+        LogPrint(eLogInfo, "NormalStreamingFileClient: Resuming from checkpoint - ", 
+                 std::fixed, std::setprecision(1), checkpoint.getProgress() * 100, "% complete");
+        return resumeTransfer(checkpoint, timeout_ms);
+    }
+    
+    LogPrint(eLogInfo, "NormalStreamingFileClient: Starting fresh download - ", filename);
+    
+    // Initialize checkpoint
+    checkpoint.serverB32 = serverB32;
+    checkpoint.filename = filename;
+    checkpoint.lastUpdate = std::chrono::steady_clock::now();
+    checkpoint.attemptCount = 0;
     
     try {
         // Step 1: Request file metadata using binary protocol
@@ -53,13 +79,19 @@ IFileTransferClient::TransferResult NormalStreamingFileClient::downloadFile(
         LogPrint(eLogInfo, "NormalStreamingFileClient: Metadata received - size=", static_cast<uint64_t>(metadata.totalSize), 
                  " chunks=", static_cast<uint32_t>(metadata.chunkCount));
         
-        // Step 2: Download file using streaming chunks
+        // Update checkpoint with metadata
+        checkpoint.totalSize = metadata.totalSize;
+        checkpoint.checksum.assign(metadata.checksum, metadata.checksum + 32);
+        m_recoveryGuard->saveCheckpoint(checkpoint);
+        
+        // Step 2: Download file using streaming chunks with monitoring
         result.stats.startTime = std::chrono::steady_clock::now();
-        auto fileData = downloadFileStream(serverB32, metadata, (timeout_ms * 2) / 3);
+        auto fileData = downloadFileStreamWithRecovery(serverB32, metadata, checkpoint, (timeout_ms * 2) / 3);
         result.stats.endTime = std::chrono::steady_clock::now();
         
-        // Step 3: Verify data integrity
-        if (verifyDownloadedData(fileData, metadata)) {
+        // Step 3: Verify data integrity with safe cleanup
+        if (!fileData.empty() && validatePartialData(fileData, metadata.totalSize) && 
+            verifyDownloadedData(fileData, metadata)) {
             result.data = std::move(fileData);
             result.success = true;
             result.stats.totalBytes = result.data.size();
@@ -67,13 +99,22 @@ IFileTransferClient::TransferResult NormalStreamingFileClient::downloadFile(
             result.stats.chunksTotal = metadata.chunkCount;
             result.stats.verified = true;
             
+            // Clear checkpoint on success
+            m_recoveryGuard.reset();
+            
             LogPrint(eLogInfo, "NormalStreamingFileClient: Download successful - ", result.data.size(), 
                      " bytes in ", result.stats.getTransferTime().count(), " ms");
             LogPrint(eLogInfo, "NormalStreamingFileClient: Throughput: ", 
                      std::fixed, std::setprecision(2), result.stats.getThroughputKBps(), " KB/s");
         } else {
-            result.error = "Data verification failed";
-            LogPrint(eLogError, "NormalStreamingFileClient: Data verification failed");
+            result.error = fileData.empty() ? "No data received" : "Data verification failed";
+            LogPrint(eLogError, "NormalStreamingFileClient: ", result.error);
+            
+            // Update checkpoint with partial data for recovery
+            checkpoint.bytesReceived = fileData.size();
+            checkpoint.partialData = std::move(fileData);
+            checkpoint.lastUpdate = std::chrono::steady_clock::now();
+            m_recoveryGuard->saveCheckpoint(checkpoint);
         }
         
     } catch (const std::exception& e) {
@@ -186,6 +227,120 @@ bool NormalStreamingFileClient::verifyDownloadedData(
     
     LogPrint(eLogInfo, "NormalStreamingFileClient: Data verification successful");
     return true;
+}
+
+bool NormalStreamingFileClient::handleRecovery(const i2p::core::TransferCheckpoint& checkpoint, 
+                                              i2p::core::RecoveryStrategy strategy) {
+    if (m_recoveryInProgress.exchange(true)) {
+        LogPrint(eLogWarning, "NormalStreamingFileClient: Recovery already in progress");
+        return false;
+    }
+    
+    LogPrint(eLogInfo, "NormalStreamingFileClient: Handling recovery for ", checkpoint.filename, 
+             " using strategy ", (int)strategy);
+    
+    bool success = false;
+    
+    try {
+        switch (strategy) {
+            case i2p::core::RecoveryStrategy::IMMEDIATE_RETRY:
+                success = downloadFile(checkpoint.serverB32, checkpoint.filename, 30000).success;
+                break;
+                
+            case i2p::core::RecoveryStrategy::DELAYED_RETRY:
+                std::this_thread::sleep_for(std::chrono::seconds(5));
+                success = downloadFile(checkpoint.serverB32, checkpoint.filename, 30000).success;
+                break;
+                
+            case i2p::core::RecoveryStrategy::CHECKPOINT_RESUME:
+                success = resumeTransfer(checkpoint, 30000).success;
+                break;
+                
+            default:
+                LogPrint(eLogWarning, "NormalStreamingFileClient: Unsupported recovery strategy");
+                break;
+        }
+    } catch (const std::exception& e) {
+        LogPrint(eLogError, "NormalStreamingFileClient: Recovery exception: ", e.what());
+    }
+    
+    m_recoveryInProgress = false;
+    return success;
+}
+
+IFileTransferClient::TransferResult NormalStreamingFileClient::resumeTransfer(
+    const i2p::core::TransferCheckpoint& checkpoint, int timeout_ms) {
+    
+    TransferResult result;
+    result.success = false;
+    
+    if (!checkpoint.isValid()) {
+        result.error = "Invalid checkpoint";
+        return result;
+    }
+    
+    LogPrint(eLogInfo, "NormalStreamingFileClient: Resuming transfer from ", 
+             checkpoint.bytesReceived, "/", checkpoint.totalSize, " bytes");
+    
+    // For streaming protocol, we need to restart from beginning
+    // TODO: Implement actual resume capability when protocol supports it
+    LogPrint(eLogInfo, "NormalStreamingFileClient: Streaming protocol requires full restart");
+    
+    return downloadFile(checkpoint.serverB32, checkpoint.filename, timeout_ms);
+}
+
+bool NormalStreamingFileClient::validatePartialData(const std::vector<uint8_t>& data, 
+                                                   size_t expectedSize) const {
+    if (data.empty()) {
+        LogPrint(eLogWarning, "NormalStreamingFileClient: No data to validate");
+        return false;
+    }
+    
+    if (data.size() > expectedSize) {
+        LogPrint(eLogError, "NormalStreamingFileClient: Data size exceeds expected - got ", 
+                 data.size(), " expected ", expectedSize);
+        return false;
+    }
+    
+    // Check for obvious corruption patterns
+    bool hasNonZero = false;
+    for (size_t i = 0; i < std::min(data.size(), size_t(1024)); ++i) {
+        if (data[i] != 0) {
+            hasNonZero = true;
+            break;
+        }
+    }
+    
+    if (!hasNonZero) {
+        LogPrint(eLogWarning, "NormalStreamingFileClient: Data appears to be all zeros");
+        return false;
+    }
+    
+    LogPrint(eLogInfo, "NormalStreamingFileClient: Partial data validation passed - ", 
+             data.size(), " bytes");
+    return true;
+}
+
+std::vector<uint8_t> NormalStreamingFileClient::downloadFileStreamWithRecovery(
+    const std::string& serverB32,
+    const BinaryFileMetadata& metadata,
+    i2p::core::TransferCheckpoint& checkpoint,
+    int timeout_ms) {
+    
+    LogPrint(eLogInfo, "NormalStreamingFileClient: Starting monitored stream download");
+    
+    // Use existing download method but with enhanced monitoring
+    // TODO: Add stream monitoring integration here
+    auto result = downloadFileStream(serverB32, metadata, timeout_ms);
+    
+    // Update checkpoint during download
+    if (!result.empty()) {
+        checkpoint.bytesReceived = result.size();
+        checkpoint.lastUpdate = std::chrono::steady_clock::now();
+        m_recoveryGuard->saveCheckpoint(checkpoint);
+    }
+    
+    return result;
 }
 
 } // namespace i2p::filetransfer

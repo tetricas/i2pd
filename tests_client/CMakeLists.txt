@@ -18,6 +18,8 @@ set(CORE_SOURCES
         core/OperationContext.cpp
         core/NetworkDetector.cpp
         core/UniversalFlowControl.cpp
+        core/StreamStabilityMonitor.cpp
+        core/TransferRecovery.cpp
 )
 
 # Transport layer
