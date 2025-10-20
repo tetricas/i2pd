@@ -333,18 +333,50 @@ std::vector<uint8_t> NormalStreamingFileClient::downloadFileStreamWithRecovery(
     
     LogPrint(eLogInfo, "NormalStreamingFileClient: Starting monitored stream download");
     
-    // Use existing download method but with enhanced monitoring
-    // TODO: Add stream monitoring integration here
-    auto result = downloadFileStream(serverB32, metadata, timeout_ms);
+    // Create stream monitor for this transfer
+    auto streamId = std::make_pair(rand(), rand()); // Generate stream ID
+    auto streamGuard = std::make_unique<i2p::core::StreamMonitorGuard>(streamId);
     
-    // Update checkpoint during download
-    if (!result.empty()) {
-        checkpoint.bytesReceived = result.size();
-        checkpoint.lastUpdate = std::chrono::steady_clock::now();
-        m_recoveryGuard->saveCheckpoint(checkpoint);
+    // Associate stream with transfer for recovery
+    if (m_recoveryGuard) {
+        m_recoveryGuard->associateStream(streamId);
     }
     
-    return result;
+    // Set up failure callback for immediate recovery
+    auto& monitor = i2p::core::StreamStabilityMonitor::getInstance();
+    monitor.setFailureCallback([this, &checkpoint, serverB32, &metadata, timeout_ms](
+        i2p::core::StreamStabilityMonitor::StreamID sid, const i2p::core::StreamHealth& health) {
+        
+        LogPrint(eLogWarning, "NormalStreamingFileClient: Stream failure detected - resends:", 
+                 health.resendCount, " tunnelSwitches:", health.tunnelSwitches);
+        
+        if (health.requiresRecovery()) {
+            LogPrint(eLogInfo, "NormalStreamingFileClient: Triggering recovery due to stream instability");
+            auto& recovery = i2p::core::TransferRecovery::getInstance();
+            recovery.handleStreamFailure(sid, health);
+        }
+    });
+    
+    try {
+        auto result = downloadFileStream(serverB32, metadata, timeout_ms);
+        
+        // Update checkpoint during download
+        if (!result.empty()) {
+            checkpoint.bytesReceived = result.size();
+            checkpoint.lastUpdate = std::chrono::steady_clock::now();
+            if (m_recoveryGuard) {
+                m_recoveryGuard->saveCheckpoint(checkpoint);
+            }
+            streamGuard->recordThroughput((result.size() / 1024.0) / (timeout_ms / 1000.0));
+        }
+        
+        return result;
+        
+    } catch (const std::exception& e) {
+        LogPrint(eLogError, "NormalStreamingFileClient: Stream download failed: ", e.what());
+        streamGuard->markUnstable();
+        throw;
+    }
 }
 
 } // namespace i2p::filetransfer
