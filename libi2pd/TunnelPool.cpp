@@ -216,7 +216,7 @@ namespace tunnel
 		std::unique_lock<std::mutex> l(m_OutboundTunnelsMutex);
 		auto tunnel = GetNextTunnel (m_OutboundTunnels, excluded, compatible);
 		if (tunnel) {
-			LogPrint (eLogInfo, "TunnelPool: Selected outbound tunnel with ", tunnel->GetNumHops(), " hops for packet transmission");
+			LogPrint (eLogDebug, "TunnelPool: Selected outbound tunnel with ", tunnel->GetNumHops(), " hops for packet transmission");
 		}
 		return tunnel;
 	}
@@ -227,7 +227,7 @@ namespace tunnel
 		std::unique_lock<std::mutex> l(m_InboundTunnelsMutex);
 		auto tunnel = GetNextTunnel (m_InboundTunnels, excluded, compatible);
 		if (tunnel) {
-			LogPrint (eLogInfo, "TunnelPool: Selected inbound tunnel with ", tunnel->GetNumHops(), " hops for packet reception");
+			LogPrint (eLogDebug, "TunnelPool: Selected inbound tunnel with ", tunnel->GetNumHops(), " hops for packet reception");
 		}
 		return tunnel;
 	}
