@@ -93,11 +93,27 @@ private:
     std::string handleClientMessage(const std::string& clientMessage, const i2p::data::IdentHash& clientHash);
     
     /**
+     * @brief Handle resume request from client
+     * @param payload Resume request payload
+     * @param clientHash Client's identity hash
+     * @return Resume response message
+     */
+    std::string handleResumeRequest(const std::string& payload, const i2p::data::IdentHash& clientHash);
+    
+    /**
      * @brief Handle file transfer on dedicated stream (new architecture)
      * @param filename File to transfer
      * @param clientHash Client's identity hash
      */
     void handleFileTransferOnStream(const std::string& filename, const i2p::data::IdentHash& clientHash);
+    
+    /**
+     * @brief Handle resumed file transfer on dedicated stream
+     * @param filename File to transfer
+     * @param clientHash Client's identity hash  
+     * @param resumeOffset Byte offset to resume from
+     */
+    void handleResumedFileTransferOnStream(const std::string& filename, const i2p::data::IdentHash& clientHash, size_t resumeOffset);
     
     /**
      * @brief Send complete file on stream
@@ -106,6 +122,15 @@ private:
      * @return Success status
      */
     bool sendFileOnStream(std::shared_ptr<stream::Stream> stream, const std::string& filename);
+    
+    /**
+     * @brief Send file on stream starting from specific offset (resume)
+     * @param stream Outbound stream to client
+     * @param filename File to send
+     * @param resumeOffset Byte offset to start from
+     * @return Success status
+     */
+    bool sendFileOnStreamFromOffset(std::shared_ptr<stream::Stream> stream, const std::string& filename, size_t resumeOffset);
     
     /**
      * @brief Send message on stream

@@ -26,6 +26,8 @@ enum class MessageType : uint8_t
     CHUNK_REQUEST = 0x03,       // Client requests specific chunk
     CHUNK_DATA = 0x04,          // Server sends chunk data
     TRANSFER_COMPLETE = 0x05,   // Client confirms transfer
+    RESUME_REQUEST = 0x06,      // Client requests resume from offset
+    RESUME_RESPONSE = 0x07,     // Server confirms resume capability
     ERROR_RESPONSE = 0xFF       // Error handling
 };
 
@@ -36,7 +38,44 @@ enum class ErrorCode : uint8_t
     CHUNK_OUT_OF_RANGE = 0x02,
     CHECKSUM_MISMATCH = 0x03,
     INVALID_REQUEST = 0x04,
+    RESUME_NOT_SUPPORTED = 0x05,
+    RESUME_INVALID_OFFSET = 0x06,
     SERVER_ERROR = 0xFF
+};
+
+// Resume request data
+struct ResumeRequest
+{
+    std::string filename;
+    size_t resumeOffset;          // Byte offset to resume from
+    std::string partialChecksum;  // Checksum of data already received
+    
+    ResumeRequest() = default;
+    ResumeRequest(const std::string& file, size_t offset, const std::string& checksum)
+        : filename(file), resumeOffset(offset), partialChecksum(checksum) {}
+        
+    // Calculate which chunk to start from
+    size_t getStartChunkIndex(size_t chunkSize) const {
+        return resumeOffset / chunkSize;
+    }
+    
+    // Calculate offset within start chunk
+    size_t getChunkOffset(size_t chunkSize) const {
+        return resumeOffset % chunkSize;
+    }
+};
+
+// Resume response data  
+struct ResumeResponse
+{
+    bool canResume;
+    size_t confirmedOffset;       // Server confirmed resume point
+    std::string remainingChecksum; // Checksum of remaining data
+    std::string errorMessage;
+    
+    ResumeResponse() : canResume(false), confirmedOffset(0) {}
+    ResumeResponse(bool resume, size_t offset) 
+        : canResume(resume), confirmedOffset(offset) {}
 };
 
 // File metadata structure

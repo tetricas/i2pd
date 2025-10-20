@@ -86,6 +86,7 @@ private:
      */
     void receiveFileOnStream(std::shared_ptr<stream::Stream> stream,
                              const std::string& filename,
+                             const std::string& serverB32,
                              int timeout_ms,
                              TransferResult& result);
     

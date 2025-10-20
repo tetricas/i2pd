@@ -124,7 +124,7 @@ ChunkedFileClient::TransferResult ChunkedFileClient::requestFile(
         }
         
         // Step 3: Receive complete file on server's dedicated stream
-        receiveFileOnStream(m_currentResponseStream, filename, timeout_ms / 2, result);
+        receiveFileOnStream(m_currentResponseStream, filename, serverB32, timeout_ms / 2, result);
         
         if (result.success) {
             result.stats.endTime = std::chrono::steady_clock::now();
@@ -205,6 +205,7 @@ void ChunkedFileClient::handleIncomingStream(std::shared_ptr<stream::Stream> str
 void ChunkedFileClient::receiveFileOnStream(
     std::shared_ptr<stream::Stream> stream,
     const std::string& filename,
+    const std::string& serverB32,
     int timeout_ms,
     TransferResult& result)
 {
@@ -260,6 +261,35 @@ void ChunkedFileClient::receiveFileOnStream(
             // Read chunk header: [4 bytes chunk_index][4 bytes chunk_size]
             std::vector<uint8_t> header = readChunkFromStream(stream, 8, TransferConfig::getChunkTimeout());
             if (header.size() != 8) {
+                // Detect potential stream failure (Session 14 recovery system)
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::steady_clock::now() - chunkStart);
+                
+                if (elapsed.count() > 10 && m_recoveryGuard) {
+                    // Likely stream failure - trigger recovery system
+                    FT_LOG_WARNING("ChunkedFileClient", "Chunk timeout after " << elapsed.count() << "s - triggering recovery");
+                    
+                    // Save checkpoint at current progress
+                    i2p::core::TransferCheckpoint checkpoint;
+                    checkpoint.serverB32 = serverB32;
+                    checkpoint.filename = filename;
+                    checkpoint.totalSize = metadata.totalSize;
+                    checkpoint.bytesReceived = result.data.size();
+                    checkpoint.partialData = result.data;
+                    checkpoint.lastUpdate = std::chrono::steady_clock::now();
+                    checkpoint.attemptCount = 1;
+                    
+                    m_recoveryGuard->saveCheckpoint(checkpoint);
+                    
+                    // Trigger recovery through manual failure simulation
+                    auto& recovery = i2p::core::TransferRecovery::getInstance();
+                    i2p::core::StreamHealth health;
+                    health.resendCount = 8; // Simulate high resend count
+                    health.isStable = false;
+                    
+                    recovery.handleStreamFailure({0, 0}, health);
+                }
+                
                 result.error = "Failed to receive chunk header " + std::to_string(chunkIndex) + 
                               " - got " + std::to_string(header.size()) + "/8 bytes";
                 FT_LOG_ERROR("ChunkedFileClient", "Failed to receive chunk header " << chunkIndex);

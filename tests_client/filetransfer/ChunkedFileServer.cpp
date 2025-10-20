@@ -177,6 +177,11 @@ std::string ChunkedFileServer::handleClientMessage(const std::string& clientMess
                     return createErrorResponse(ErrorCode::INVALID_REQUEST, "Invalid filename in request");
                 }
             }
+            
+            case MessageType::RESUME_REQUEST: {
+                // Handle resume request
+                return handleResumeRequest(payload, clientHash);
+            }
                 
             case MessageType::CHUNK_REQUEST:
                 // Legacy support
@@ -307,6 +312,91 @@ std::string ChunkedFileServer::handleChunkRequest(const std::string& payload)
     }
 }
 
+std::string ChunkedFileServer::handleResumeRequest(const std::string& payload, const i2p::data::IdentHash& clientHash)
+{
+    try {
+        // Parse resume request: filename=test.bin&resume_offset=52428800&checksum_partial=abc123...
+        std::string filename;
+        size_t resumeOffset = 0;
+        std::string partialChecksum;
+        
+        std::istringstream iss(payload);
+        std::string token;
+        while (std::getline(iss, token, '&')) {
+            size_t pos = token.find('=');
+            if (pos != std::string::npos) {
+                std::string key = token.substr(0, pos);
+                std::string value = token.substr(pos + 1);
+                if (key == "filename") filename = value;
+                else if (key == "resume_offset") resumeOffset = std::stoul(value);
+                else if (key == "checksum_partial") partialChecksum = value;
+            }
+        }
+        
+        LogPrint(eLogInfo, "ChunkedFileServer: Resume request for: ", filename, 
+                 " at offset: ", resumeOffset, " with checksum: ", partialChecksum.substr(0, 8), "...");
+        
+        // Check if file exists
+        std::lock_guard<std::mutex> lock(m_filesMutex);
+        auto fileIt = m_files.find(filename);
+        auto metaIt = m_fileMetadata.find(filename);
+        
+        if (fileIt == m_files.end() || metaIt == m_fileMetadata.end()) {
+            LogPrint(eLogWarning, "ChunkedFileServer: File not found for resume: ", filename);
+            return createErrorResponse(ErrorCode::FILE_NOT_FOUND, "File not found: " + filename);
+        }
+        
+        const auto& fileData = fileIt->second;
+        const auto& metadata = metaIt->second;
+        
+        // Validate resume offset
+        if (resumeOffset >= metadata.totalSize) {
+            LogPrint(eLogWarning, "ChunkedFileServer: Invalid resume offset: ", resumeOffset, "/", metadata.totalSize);
+            return createErrorResponse(ErrorCode::RESUME_INVALID_OFFSET, "Resume offset beyond file size");
+        }
+        
+        // Verify partial checksum if provided
+        if (!partialChecksum.empty() && resumeOffset > 0) {
+            std::vector<uint8_t> partialData(fileData.begin(), fileData.begin() + resumeOffset);
+            std::string calculatedChecksum = ProtocolUtils::calculateSHA256(partialData);
+            
+            if (calculatedChecksum != partialChecksum) {
+                LogPrint(eLogWarning, "ChunkedFileServer: Partial checksum mismatch - expected: ", 
+                         partialChecksum, " calculated: ", calculatedChecksum);
+                return createErrorResponse(ErrorCode::CHECKSUM_MISMATCH, "Partial checksum verification failed");
+            }
+        }
+        
+        // Create resume response - confirm we can resume
+        ResumeResponse resumeResp(true, resumeOffset);
+        
+        // Calculate checksum for remaining data
+        if (resumeOffset < metadata.totalSize) {
+            std::vector<uint8_t> remainingData(fileData.begin() + resumeOffset, fileData.end());
+            resumeResp.remainingChecksum = ProtocolUtils::calculateSHA256(remainingData);
+        }
+        
+        LogPrint(eLogInfo, "ChunkedFileServer: Resume approved - ", filename, 
+                 " from offset ", resumeOffset, " (", metadata.totalSize - resumeOffset, " bytes remaining)");
+        
+        // Start resumed file transfer on dedicated stream
+        std::thread([this, filename, clientHash, resumeOffset]() {
+            handleResumedFileTransferOnStream(filename, clientHash, resumeOffset);
+        }).detach();
+        
+        // Return immediate acknowledgment with resume confirmation
+        std::ostringstream response;
+        response << "can_resume=true&confirmed_offset=" << resumeResp.confirmedOffset
+                << "&remaining_checksum=" << resumeResp.remainingChecksum;
+        
+        return std::to_string(static_cast<int>(MessageType::RESUME_RESPONSE)) + ":" + response.str();
+        
+    } catch (const std::exception& e) {
+        LogPrint(eLogError, "ChunkedFileServer: handleResumeRequest exception: ", e.what());
+        return createErrorResponse(ErrorCode::SERVER_ERROR, "Failed to process resume request");
+    }
+}
+
 std::string ChunkedFileServer::handleTransferComplete(const std::string& payload)
 {
     try {
@@ -428,6 +518,55 @@ void ChunkedFileServer::handleFileTransferOnStream(const std::string& filename, 
     }
 }
 
+void ChunkedFileServer::handleResumedFileTransferOnStream(const std::string& filename, const i2p::data::IdentHash& clientHash, size_t resumeOffset)
+{
+    LogPrint(eLogInfo, "ChunkedFileServer: Starting RESUMED file transfer on stream for: ", filename, " from offset: ", resumeOffset);
+    
+    try {
+        // Create outbound stream to client
+        auto streamingDest = m_destination->GetStreamingDestination();
+        if (!streamingDest) {
+            LogPrint(eLogError, "ChunkedFileServer: Could not get streaming destination for resume");
+            return;
+        }
+        
+        // Wait a moment for client to set up stream acceptor
+        std::this_thread::sleep_for(std::chrono::milliseconds(i2p::filetransfer::TransferConfig::getConnectionTimeout() / 20));
+        
+        // Create stream to client
+        auto stream = m_destination->CreateStream(clientHash);
+        for (int i = 0; i < 50 && !stream; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            stream = m_destination->CreateStream(clientHash);
+        }
+        
+        if (!stream) {
+            LogPrint(eLogError, "ChunkedFileServer: Failed to create stream to client for resume");
+            return;
+        }
+        
+        // Wait for stream to establish
+        for (int i = 0; i < 50 && !stream->IsEstablished(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        
+        LogPrint(eLogInfo, "ChunkedFileServer: Resume stream ready, sending remaining file data from offset: ", resumeOffset);
+        
+        // Send remaining file data from offset
+        if (sendFileOnStreamFromOffset(stream, filename, resumeOffset)) {
+            LogPrint(eLogInfo, "ChunkedFileServer: Resume transfer completed successfully");
+        } else {
+            LogPrint(eLogError, "ChunkedFileServer: Resume transfer failed");
+        }
+        
+        // Close stream
+        stream->Close();
+        
+    } catch (const std::exception& e) {
+        LogPrint(eLogError, "ChunkedFileServer: Exception in handleResumedFileTransferOnStream: ", e.what());
+    }
+}
+
 bool ChunkedFileServer::sendFileOnStream(std::shared_ptr<stream::Stream> stream, const std::string& filename)
 {
     if (!stream) {
@@ -524,6 +663,133 @@ bool ChunkedFileServer::sendFileOnStream(std::shared_ptr<stream::Stream> stream,
         
     } catch (const std::exception& e) {
         LogPrint(eLogError, "ChunkedFileServer: Exception in sendFileOnStream: ", e.what());
+        return false;
+    }
+}
+
+bool ChunkedFileServer::sendFileOnStreamFromOffset(std::shared_ptr<stream::Stream> stream, const std::string& filename, size_t resumeOffset)
+{
+    if (!stream) {
+        LogPrint(eLogError, "ChunkedFileServer: No stream provided for resume");
+        return false;
+    }
+    
+    std::lock_guard<std::mutex> lock(m_filesMutex);
+    
+    // Check if file exists
+    auto fileIt = m_files.find(filename);
+    auto metaIt = m_fileMetadata.find(filename);
+    
+    if (fileIt == m_files.end() || metaIt == m_fileMetadata.end()) {
+        LogPrint(eLogError, "ChunkedFileServer: File not found for resume: ", filename);
+        return false;
+    }
+    
+    const auto& fileData = fileIt->second;
+    const auto& metadata = metaIt->second;
+    
+    if (resumeOffset >= metadata.totalSize) {
+        LogPrint(eLogError, "ChunkedFileServer: Resume offset beyond file size: ", resumeOffset, "/", metadata.totalSize);
+        return false;
+    }
+    
+    try {
+        // Step 1: Send metadata for remaining portion
+        std::ostringstream metadataMsg;
+        size_t remainingSize = metadata.totalSize - resumeOffset;
+        
+        // Calculate checksum for remaining data
+        std::vector<uint8_t> remainingData(fileData.begin() + resumeOffset, fileData.end());
+        std::string remainingChecksum = ProtocolUtils::calculateSHA256(remainingData);
+        
+        metadataMsg << "2:filename=" << metadata.filename
+                   << "&size=" << remainingSize
+                   << "&resume_offset=" << resumeOffset  
+                   << "&checksum=" << remainingChecksum;
+        
+        LogPrint(eLogInfo, "ChunkedFileServer: Sending RESUME metadata: ", metadataMsg.str());
+        
+        size_t metadataSent = sendMessageOnStream(stream, metadataMsg.str());
+        if (metadataSent == 0) {
+            LogPrint(eLogError, "ChunkedFileServer: Failed to send resume metadata");
+            return false;
+        }
+        
+        // Step 2: Calculate starting chunk and offset within chunk
+        size_t startChunkIndex = resumeOffset / metadata.chunkSize;
+        size_t offsetInChunk = resumeOffset % metadata.chunkSize;
+        
+        LogPrint(eLogInfo, "ChunkedFileServer: Resume metadata sent, sending chunks from chunk ", 
+                 startChunkIndex, " with ", offsetInChunk, " byte offset...");
+        
+        // Step 3: Send chunks from resume point
+        int lastThreshold = 0;
+        for (size_t chunkIndex = startChunkIndex; chunkIndex < metadata.chunkCount; ++chunkIndex) {
+            if (!m_running.load()) {
+                LogPrint(eLogInfo, "ChunkedFileServer: Resume transfer cancelled");
+                return false;
+            }
+            
+            // Calculate chunk boundaries
+            size_t chunkStartOffset = chunkIndex * metadata.chunkSize;
+            size_t chunkEndOffset = std::min((chunkIndex + 1) * metadata.chunkSize, fileData.size());
+            
+            // For first chunk, skip bytes already received
+            if (chunkIndex == startChunkIndex && offsetInChunk > 0) {
+                chunkStartOffset += offsetInChunk;
+            }
+            
+            if (chunkStartOffset >= chunkEndOffset) {
+                continue; // Skip if nothing to send in this chunk
+            }
+            
+            size_t chunkSize = chunkEndOffset - chunkStartOffset;
+            
+            // Create chunk with header: [4 bytes chunk_index][4 bytes chunk_size][chunk_data]
+            std::vector<uint8_t> chunkPacket;
+            chunkPacket.reserve(8 + chunkSize);
+            
+            // Add chunk index (4 bytes, little-endian)
+            uint32_t idx = static_cast<uint32_t>(chunkIndex);
+            chunkPacket.push_back(idx & 0xFF);
+            chunkPacket.push_back((idx >> 8) & 0xFF);
+            chunkPacket.push_back((idx >> 16) & 0xFF);
+            chunkPacket.push_back((idx >> 24) & 0xFF);
+            
+            // Add chunk size (4 bytes, little-endian)  
+            uint32_t size = static_cast<uint32_t>(chunkSize);
+            chunkPacket.push_back(size & 0xFF);
+            chunkPacket.push_back((size >> 8) & 0xFF);
+            chunkPacket.push_back((size >> 16) & 0xFF);
+            chunkPacket.push_back((size >> 24) & 0xFF);
+            
+            // Add chunk data
+            chunkPacket.insert(chunkPacket.end(), 
+                              fileData.begin() + chunkStartOffset,
+                              fileData.begin() + chunkEndOffset);
+            
+            size_t chunkSent = sendChunkOnStream(stream, chunkPacket);
+            if (chunkSent != chunkPacket.size()) {
+                LogPrint(eLogError, "ChunkedFileServer: Failed to send complete resume chunk ", chunkIndex, 
+                         " - sent ", chunkSent, "/", chunkPacket.size(), " bytes");
+                return false;
+            }
+            
+            // Progress reporting (based on remaining chunks)
+            double progress = 100.0 * (chunkIndex - startChunkIndex + 1) / (metadata.chunkCount - startChunkIndex);
+            if (progress >= lastThreshold + 10) {
+                lastThreshold += 10;
+                LogPrint(eLogInfo, "ChunkedFileServer: Sent resume chunk ", chunkIndex + 1, "/",
+                        metadata.chunkCount, " (", chunkSize, " data bytes + 8 header bytes)");
+                std::cout << "Resume Progress: " << lastThreshold << "%\n";
+            }
+        }
+        
+        LogPrint(eLogInfo, "ChunkedFileServer: All resume chunks sent successfully from offset ", resumeOffset);
+        return true;
+        
+    } catch (const std::exception& e) {
+        LogPrint(eLogError, "ChunkedFileServer: Exception in sendFileOnStreamFromOffset: ", e.what());
         return false;
     }
 }
