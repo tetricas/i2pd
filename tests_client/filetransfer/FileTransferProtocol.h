@@ -155,8 +155,44 @@ public:
         return ss.str();
     }
     
-    // Generate mock file data with predictable pattern
+    // Generate mock file data with predictable pattern (memory-efficient for large files)
     static std::vector<uint8_t> generateMockFile(size_t size, const std::string& seed = "test")
+    {
+        // For very large files (>50MB), refuse to generate in-memory and suggest file-based approach
+        const size_t MAX_SAFE_SIZE = 50 * 1024 * 1024; // 50MB safety limit
+        
+        if (size > MAX_SAFE_SIZE) {
+            throw std::runtime_error("File size too large for in-memory generation: " + 
+                                   std::to_string(size) + " bytes. Use file-based approach instead.");
+        }
+        
+        // Generate data in chunks to avoid large contiguous allocation
+        std::vector<uint8_t> data;
+        const size_t CHUNK_SIZE = 1024 * 1024; // 1MB chunks
+        
+        constexpr std::hash<std::string> hasher;
+        const auto seedHash = static_cast<uint32_t>(hasher(seed));
+        
+        for (size_t offset = 0; offset < size; offset += CHUNK_SIZE) {
+            size_t currentChunkSize = std::min(CHUNK_SIZE, size - offset);
+            
+            // Generate chunk
+            std::vector<uint8_t> chunk(currentChunkSize);
+            for (size_t i = 0; i < currentChunkSize; ++i) {
+                uint32_t value = seedHash ^ static_cast<uint32_t>(offset + i);
+                value = value * 1664525 + 1013904223; // Linear congruential generator
+                chunk[i] = static_cast<uint8_t>(value & 0xFF);
+            }
+            
+            // Append to result
+            data.insert(data.end(), chunk.begin(), chunk.end());
+        }
+        
+        return data;
+    }
+    
+    // Generate a chunk of mock data (helper for large files)
+    static std::vector<uint8_t> generateMockFileChunk(size_t size, const std::string& seed, size_t globalOffset)
     {
         std::vector<uint8_t> data(size);
         
@@ -166,7 +202,7 @@ public:
         
         for (size_t i = 0; i < size; ++i) {
             // Create pseudo-random but reproducible pattern
-            uint32_t value = seedHash ^ static_cast<uint32_t>(i);
+            uint32_t value = seedHash ^ static_cast<uint32_t>(globalOffset + i);
             value = value * 1664525 + 1013904223; // Linear congruential generator
             data[i] = static_cast<uint8_t>(value & 0xFF);
         }
