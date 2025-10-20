@@ -18,6 +18,7 @@ struct TransferCheckpoint {
     size_t totalSize = 0;
     size_t bytesReceived = 0;
     std::vector<uint8_t> partialData;
+    std::string storagePath;  // Path to temp file for large transfers
     std::chrono::steady_clock::time_point lastUpdate;
     std::vector<uint8_t> checksum;
     int attemptCount = 0;

@@ -32,6 +32,7 @@ private:
     
     // File storage
     std::map<std::string, std::vector<uint8_t>> m_files;
+    std::map<std::string, std::shared_ptr<VirtualFile>> m_virtualFiles;
     std::map<std::string, FileMetadata> m_fileMetadata;
     mutable std::mutex m_filesMutex;
     

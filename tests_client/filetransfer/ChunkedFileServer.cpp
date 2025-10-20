@@ -39,8 +39,33 @@ void ChunkedFileServer::addMockFile(const std::string& filename, const std::vect
 void ChunkedFileServer::generateMockFile(const std::string& filename, size_t size, const std::string& seed)
 {
     std::string actualSeed = seed.empty() ? filename : seed;
-    auto data = ProtocolUtils::generateMockFile(size, actualSeed);
-    addMockFile(filename, data);
+    
+    // For large files (>100MB), use virtual file system for memory efficiency
+    const size_t VIRTUAL_FILE_THRESHOLD = 100 * 1024 * 1024; // 100MB
+    
+    if (size > VIRTUAL_FILE_THRESHOLD) {
+        LogPrint(eLogInfo, "ChunkedFileServer: Creating large virtual file: ", filename, " (", size, " bytes)");
+        
+        // Create virtual file
+        auto virtualFile = std::make_shared<MockVirtualFile>(size, actualSeed);
+        
+        // Create metadata for virtual file
+        FileMetadata metadata(filename, size);
+        metadata.isVirtual = true;
+        metadata.sha256Checksum = virtualFile->calculateChecksum();
+        
+        // Store virtual file and metadata
+        std::lock_guard<std::mutex> lock(m_filesMutex);
+        m_virtualFiles[filename] = virtualFile;
+        m_fileMetadata[filename] = metadata;
+        
+        FT_LOG_INFO("ChunkedFileServer", "Added virtual file '" << filename << "' (" << size << " bytes, " 
+                   << metadata.chunkCount << " chunks, checksum: " << metadata.sha256Checksum.substr(0, 8) << "...)");
+    } else {
+        // Use regular in-memory generation for smaller files
+        auto data = ProtocolUtils::generateMockFile(size, actualSeed);
+        addMockFile(filename, data);
+    }
 }
 
 void ChunkedFileServer::start()
@@ -576,17 +601,36 @@ bool ChunkedFileServer::sendFileOnStream(std::shared_ptr<stream::Stream> stream,
     
     std::lock_guard<std::mutex> lock(m_filesMutex);
     
-    // Check if file exists
-    auto fileIt = m_files.find(filename);
+    // Check if file exists (in-memory or virtual)
     auto metaIt = m_fileMetadata.find(filename);
-    
-    if (fileIt == m_files.end() || metaIt == m_fileMetadata.end()) {
+    if (metaIt == m_fileMetadata.end()) {
         LogPrint(eLogError, "ChunkedFileServer: File not found: ", filename);
         return false;
     }
     
-    const auto& fileData = fileIt->second;
     const auto& metadata = metaIt->second;
+    
+    // Check if it's a virtual file or regular file
+    std::shared_ptr<VirtualFile> virtualFile = nullptr;
+    std::vector<uint8_t> fileData;
+    
+    if (metadata.isVirtual) {
+        auto virtualIt = m_virtualFiles.find(filename);
+        if (virtualIt == m_virtualFiles.end()) {
+            LogPrint(eLogError, "ChunkedFileServer: Virtual file not found: ", filename);
+            return false;
+        }
+        virtualFile = virtualIt->second;
+        LogPrint(eLogInfo, "ChunkedFileServer: Using virtual file for: ", filename);
+    } else {
+        auto fileIt = m_files.find(filename);
+        if (fileIt == m_files.end()) {
+            LogPrint(eLogError, "ChunkedFileServer: Regular file not found: ", filename);
+            return false;
+        }
+        fileData = fileIt->second;
+        LogPrint(eLogInfo, "ChunkedFileServer: Using regular file for: ", filename);
+    }
     
     try {
         // Step 1: Send metadata (without chunk_count - let client discover end naturally)
@@ -615,7 +659,7 @@ bool ChunkedFileServer::sendFileOnStream(std::shared_ptr<stream::Stream> stream,
             
             // Extract chunk data
             size_t startOffset = chunkIndex * metadata.chunkSize;
-            size_t chunkSize = std::min(metadata.chunkSize, fileData.size() - startOffset);
+            size_t chunkSize = std::min(metadata.chunkSize, metadata.totalSize - startOffset);
             
             // Create chunk with header: [4 bytes chunk_index][4 bytes chunk_size][chunk_data]
             std::vector<uint8_t> chunkPacket;
@@ -635,10 +679,17 @@ bool ChunkedFileServer::sendFileOnStream(std::shared_ptr<stream::Stream> stream,
             chunkPacket.push_back((size >> 16) & 0xFF);
             chunkPacket.push_back((size >> 24) & 0xFF);
             
-            // Add chunk data
-            chunkPacket.insert(chunkPacket.end(), 
-                              fileData.begin() + startOffset,
-                              fileData.begin() + startOffset + chunkSize);
+            // Add chunk data - generate on demand for virtual files or use stored data
+            if (metadata.isVirtual && virtualFile) {
+                // Generate chunk data on-demand
+                auto chunkData = virtualFile->generateChunk(startOffset, chunkSize);
+                chunkPacket.insert(chunkPacket.end(), chunkData.begin(), chunkData.end());
+            } else {
+                // Use pre-loaded file data
+                chunkPacket.insert(chunkPacket.end(), 
+                                  fileData.begin() + startOffset,
+                                  fileData.begin() + startOffset + chunkSize);
+            }
             
             size_t chunkSent = sendChunkOnStream(stream, chunkPacket);
             if (chunkSent != chunkPacket.size()) {

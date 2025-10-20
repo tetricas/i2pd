@@ -60,9 +60,27 @@ public:
      */
     struct TransferResult {
         TransferStats stats;
-        std::vector<uint8_t> data;
+        std::vector<uint8_t> data;  // For backward compatibility - small files only
         bool success;
         std::string error;
+        std::unique_ptr<TransferStorage> storage;  // Unified storage interface
+        
+        // Helper methods
+        size_t getDataSize() const {
+            return storage ? storage->size() : data.size();
+        }
+        
+        std::vector<uint8_t> getData() const {
+            if (storage) {
+                auto storageData = storage->getData();
+                return storageData.empty() ? data : storageData;
+            }
+            return data;
+        }
+        
+        std::string getStoragePath() const {
+            return storage ? storage->getStoragePath() : "legacy";
+        }
     };
     
     TransferResult requestFile(const std::string& serverB32, 

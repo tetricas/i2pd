@@ -8,9 +8,14 @@
 #include <iomanip>
 #include <functional>
 #include <cstring>
+#include <fstream>
+#include <memory>
 
 namespace i2p::filetransfer
 {
+
+// Forward declaration
+class ProtocolUtils;
 
 // Protocol constants
 constexpr size_t DEFAULT_CHUNK_SIZE = 512;
@@ -78,6 +83,95 @@ struct ResumeResponse
         : canResume(resume), confirmedOffset(offset) {}
 };
 
+// Virtual file interface for on-demand generation
+class VirtualFile
+{
+public:
+    virtual ~VirtualFile() = default;
+    virtual size_t getSize() const = 0;
+    virtual std::string getSeed() const = 0;
+    virtual std::vector<uint8_t> generateChunk(size_t offset, size_t size) const = 0;
+    virtual std::string calculateChecksum() const = 0;
+    virtual std::string calculatePartialChecksum(size_t bytes) const = 0;
+};
+
+// Mock virtual file implementation for large files
+class MockVirtualFile : public VirtualFile
+{
+private:
+    size_t m_size;
+    std::string m_seed;
+    uint32_t m_seedHash;
+    
+public:
+    MockVirtualFile(size_t size, const std::string& seed = "test") 
+        : m_size(size), m_seed(seed)
+    {
+        constexpr std::hash<std::string> hasher;
+        m_seedHash = static_cast<uint32_t>(hasher(seed));
+    }
+    
+    size_t getSize() const override { return m_size; }
+    std::string getSeed() const override { return m_seed; }
+    
+    std::vector<uint8_t> generateChunk(size_t offset, size_t size) const override
+    {
+        std::vector<uint8_t> data(size);
+        for (size_t i = 0; i < size; ++i) {
+            uint32_t value = m_seedHash ^ static_cast<uint32_t>(offset + i);
+            value = value * 1664525 + 1013904223; // Linear congruential generator
+            data[i] = static_cast<uint8_t>(value & 0xFF);
+        }
+        return data;
+    }
+    
+    std::string calculateChecksum() const override
+    {
+        // For large files, calculate checksum progressively to avoid memory issues
+        const size_t BUFFER_SIZE = 1024 * 1024; // 1MB buffer
+        uint64_t hash = 14695981039346656037ULL; // FNV-1a 64-bit offset basis
+        const uint64_t prime = 1099511628211ULL;  // FNV-1a 64-bit prime
+        
+        for (size_t offset = 0; offset < m_size; offset += BUFFER_SIZE) {
+            size_t chunkSize = std::min(BUFFER_SIZE, m_size - offset);
+            auto chunk = generateChunk(offset, chunkSize);
+            
+            for (uint8_t byte : chunk) {
+                hash ^= byte;
+                hash *= prime;
+            }
+        }
+        
+        std::stringstream ss;
+        ss << std::hex << hash;
+        return ss.str();
+    }
+    
+    std::string calculatePartialChecksum(size_t bytes) const override
+    {
+        if (bytes > m_size) bytes = m_size;
+        
+        const size_t BUFFER_SIZE = 1024 * 1024; // 1MB buffer
+        uint64_t hash = 14695981039346656037ULL; // FNV-1a 64-bit offset basis
+        const uint64_t prime = 1099511628211ULL;  // FNV-1a 64-bit prime
+        
+        for (size_t offset = 0; offset < bytes; offset += BUFFER_SIZE) {
+            size_t chunkSize = std::min(BUFFER_SIZE, bytes - offset);
+            auto chunk = generateChunk(offset, chunkSize);
+            
+            for (uint8_t byte : chunk) {
+                hash ^= byte;
+                hash *= prime;
+            }
+        }
+        
+        std::stringstream ss;
+        ss << std::hex << hash;
+        return ss.str();
+    }
+};
+
+
 // File metadata structure
 struct FileMetadata
 {
@@ -86,6 +180,7 @@ struct FileMetadata
     size_t chunkSize;
     size_t chunkCount;
     std::string sha256Checksum;
+    bool isVirtual = false;  // True if file is generated on-demand
     
     FileMetadata() = default;
     FileMetadata(const std::string& name, size_t size, size_t chunk_size = DEFAULT_CHUNK_SIZE)
@@ -158,12 +253,13 @@ public:
     // Generate mock file data with predictable pattern (memory-efficient for large files)
     static std::vector<uint8_t> generateMockFile(size_t size, const std::string& seed = "test")
     {
-        // For very large files (>50MB), refuse to generate in-memory and suggest file-based approach
-        const size_t MAX_SAFE_SIZE = 50 * 1024 * 1024; // 50MB safety limit
+        // For large files (>100MB), use streaming generation but still return full data
+        // This allows backwards compatibility while being more memory-efficient
+        const size_t MAX_DIRECT_SIZE = 100 * 1024 * 1024; // 100MB direct generation limit
         
-        if (size > MAX_SAFE_SIZE) {
-            throw std::runtime_error("File size too large for in-memory generation: " + 
-                                   std::to_string(size) + " bytes. Use file-based approach instead.");
+        if (size > MAX_DIRECT_SIZE) {
+            // Use streaming approach with periodic allocation
+            return generateLargeMockFile(size, seed);
         }
         
         // Generate data in chunks to avoid large contiguous allocation
@@ -186,6 +282,45 @@ public:
             
             // Append to result
             data.insert(data.end(), chunk.begin(), chunk.end());
+        }
+        
+        return data;
+    }
+    
+    // Generate large mock file using streaming approach (for files >100MB)
+    static std::vector<uint8_t> generateLargeMockFile(size_t size, const std::string& seed = "test")
+    {
+        // Reserve memory more conservatively
+        std::vector<uint8_t> data;
+        
+        constexpr std::hash<std::string> hasher;
+        const auto seedHash = static_cast<uint32_t>(hasher(seed));
+        
+        // Use larger chunks for efficiency but smaller increments for memory safety
+        const size_t CHUNK_SIZE = 4 * 1024 * 1024; // 4MB chunks
+        const size_t RESERVE_INCREMENT = 50 * 1024 * 1024; // Reserve 50MB at a time
+        
+        size_t reservedSize = 0;
+        
+        for (size_t offset = 0; offset < size; offset += CHUNK_SIZE) {
+            // Reserve more memory if needed
+            if (data.size() + CHUNK_SIZE > reservedSize) {
+                size_t newReserve = std::min(reservedSize + RESERVE_INCREMENT, size);
+                data.reserve(newReserve);
+                reservedSize = newReserve;
+            }
+            
+            size_t currentChunkSize = std::min(CHUNK_SIZE, size - offset);
+            
+            // Generate chunk directly into vector
+            size_t oldSize = data.size();
+            data.resize(oldSize + currentChunkSize);
+            
+            for (size_t i = 0; i < currentChunkSize; ++i) {
+                uint32_t value = seedHash ^ static_cast<uint32_t>(offset + i);
+                value = value * 1664525 + 1013904223; // Linear congruential generator
+                data[oldSize + i] = static_cast<uint8_t>(value & 0xFF);
+            }
         }
         
         return data;
@@ -277,6 +412,171 @@ private:
             checksum = checksum * 31 + bytes[i];
         }
         return checksum;
+    }
+};
+
+// Unified storage interface for handling both memory and file-based storage
+class TransferStorage
+{
+public:
+    virtual ~TransferStorage() = default;
+    virtual void write(const std::vector<uint8_t>& data) = 0;
+    virtual void append(const std::vector<uint8_t>& data) = 0;
+    virtual std::vector<uint8_t> getData() const = 0;
+    virtual size_t size() const = 0;
+    virtual std::string calculateChecksum() const = 0;
+    virtual std::string getStoragePath() const = 0;
+    virtual void clear() = 0;
+    virtual bool isFileBasedStorage() const = 0;
+    virtual bool verify(const std::string& expectedChecksum) const = 0;
+};
+
+// Memory-based storage for small files
+class MemoryStorage : public TransferStorage
+{
+private:
+    std::vector<uint8_t> m_data;
+    
+public:
+    void write(const std::vector<uint8_t>& data) override {
+        m_data = data;
+    }
+    
+    void append(const std::vector<uint8_t>& data) override {
+        m_data.insert(m_data.end(), data.begin(), data.end());
+    }
+    
+    std::vector<uint8_t> getData() const override {
+        return m_data;
+    }
+    
+    size_t size() const override {
+        return m_data.size();
+    }
+    
+    std::string calculateChecksum() const override {
+        return ProtocolUtils::calculateSHA256(m_data);
+    }
+    
+    std::string getStoragePath() const override {
+        return "memory";
+    }
+    
+    void clear() override {
+        m_data.clear();
+    }
+    
+    bool isFileBasedStorage() const override {
+        return false;
+    }
+    
+    bool verify(const std::string& expectedChecksum) const override {
+        return calculateChecksum() == expectedChecksum;
+    }
+};
+
+// File-based storage for large files
+class FileStorage : public TransferStorage
+{
+private:
+    std::string m_filePath;
+    size_t m_currentSize = 0;
+    
+public:
+    explicit FileStorage(const std::string& filePath) : m_filePath(filePath) {
+        // Create directory if needed
+        auto lastSlash = filePath.find_last_of('/');
+        if (lastSlash != std::string::npos) {
+            std::string dir = filePath.substr(0, lastSlash);
+            // Note: mkdir implementation would be platform-specific
+            // For now, assume directory exists or will be created by caller
+        }
+    }
+    
+    ~FileStorage() {
+        // Optionally clean up temp file
+        // std::remove(m_filePath.c_str());
+    }
+    
+    void write(const std::vector<uint8_t>& data) override {
+        std::ofstream file(m_filePath, std::ios::binary | std::ios::trunc);
+        if (!file) {
+            throw std::runtime_error("Failed to open file for writing: " + m_filePath);
+        }
+        file.write(reinterpret_cast<const char*>(data.data()), data.size());
+        m_currentSize = data.size();
+    }
+    
+    void append(const std::vector<uint8_t>& data) override {
+        std::ofstream file(m_filePath, std::ios::binary | std::ios::app);
+        if (!file) {
+            throw std::runtime_error("Failed to open file for appending: " + m_filePath);
+        }
+        file.write(reinterpret_cast<const char*>(data.data()), data.size());
+        m_currentSize += data.size();
+    }
+    
+    std::vector<uint8_t> getData() const override {
+        std::ifstream file(m_filePath, std::ios::binary);
+        if (!file) {
+            return {};
+        }
+        
+        file.seekg(0, std::ios::end);
+        size_t fileSize = file.tellg();
+        file.seekg(0, std::ios::beg);
+        
+        std::vector<uint8_t> data(fileSize);
+        file.read(reinterpret_cast<char*>(data.data()), fileSize);
+        return data;
+    }
+    
+    size_t size() const override {
+        return m_currentSize;
+    }
+    
+    std::string calculateChecksum() const override {
+        // Calculate checksum progressively to avoid loading entire file
+        std::ifstream file(m_filePath, std::ios::binary);
+        if (!file) {
+            return "";
+        }
+        
+        const size_t BUFFER_SIZE = 1024 * 1024; // 1MB buffer
+        uint64_t hash = 14695981039346656037ULL; // FNV-1a 64-bit offset basis
+        const uint64_t prime = 1099511628211ULL;  // FNV-1a 64-bit prime
+        
+        std::vector<uint8_t> buffer(BUFFER_SIZE);
+        while (file) {
+            file.read(reinterpret_cast<char*>(buffer.data()), BUFFER_SIZE);
+            size_t bytesRead = file.gcount();
+            
+            for (size_t i = 0; i < bytesRead; ++i) {
+                hash ^= buffer[i];
+                hash *= prime;
+            }
+        }
+        
+        std::stringstream ss;
+        ss << std::hex << hash;
+        return ss.str();
+    }
+    
+    std::string getStoragePath() const override {
+        return m_filePath;
+    }
+    
+    void clear() override {
+        std::ofstream file(m_filePath, std::ios::binary | std::ios::trunc);
+        m_currentSize = 0;
+    }
+    
+    bool isFileBasedStorage() const override {
+        return true;
+    }
+    
+    bool verify(const std::string& expectedChecksum) const override {
+        return calculateChecksum() == expectedChecksum;
     }
 };
 

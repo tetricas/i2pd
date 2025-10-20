@@ -133,16 +133,23 @@ ChunkedFileClient::TransferResult ChunkedFileClient::requestFile(
             // Clear checkpoint on success
             m_recoveryGuard.reset();
             
-            FT_LOG_INFO("ChunkedFileClient", "Transfer complete - " << result.stats.totalBytes << " bytes in " << result.stats.getTransferTime().count() << "ms, " << result.stats.getThroughputKBps() << " KB/s");
+            FT_LOG_INFO("ChunkedFileClient", "Transfer complete - " << result.getDataSize() << " bytes in " << result.stats.getTransferTime().count() << "ms, " << result.stats.getThroughputKBps() << " KB/s at " << result.getStoragePath());
         } else {
-            // Save checkpoint for recovery with validation
-            if (!result.data.empty() && validatePartialData(result.data, checkpoint.totalSize)) {
-                checkpoint.bytesReceived = result.data.size();
-                checkpoint.partialData = std::move(result.data);
+            // Save checkpoint for recovery using unified storage
+            if (result.storage && result.storage->size() > 0) {
+                checkpoint.bytesReceived = result.storage->size();
+                checkpoint.storagePath = result.storage->getStoragePath();
+                
+                // For small files, also save data for compatibility
+                auto data = result.getData();
+                if (!data.empty() && validatePartialData(data, checkpoint.totalSize)) {
+                    checkpoint.partialData = std::move(data);
+                }
+                
                 checkpoint.lastUpdate = std::chrono::steady_clock::now();
                 m_recoveryGuard->saveCheckpoint(checkpoint);
                 LogPrint(eLogInfo, "ChunkedFileClient: Checkpoint saved for recovery - ", 
-                         checkpoint.bytesReceived, " bytes");
+                         checkpoint.bytesReceived, " bytes at ", checkpoint.storagePath);
             }
         }
         
@@ -240,12 +247,38 @@ void ChunkedFileClient::receiveFileOnStream(
         
         FT_LOG_INFO("ChunkedFileClient", "Metadata received - Size: " << metadata.totalSize << ", Checksum: " << metadata.sha256Checksum.substr(0, 8) << "... (chunks will be discovered)");
         
-        result.data.reserve(metadata.totalSize);
+        // Create appropriate storage based on file size
+        const size_t LARGE_FILE_THRESHOLD = 100 * 1024 * 1024; // 100MB
+        
+        if (metadata.totalSize > LARGE_FILE_THRESHOLD) {
+            // Use file-based storage for large files
+            std::string tempFilePath = "/tmp/ft_" + filename + "_" + std::to_string(rand()) + ".tmp";
+            auto fileStorage = std::make_unique<FileStorage>(tempFilePath);
+            
+            // Check if file was created successfully  
+            try {
+                fileStorage->write({});  // Test write
+            } catch (const std::exception& e) {
+                result.error = "Failed to create temporary file: " + tempFilePath + " - " + e.what();
+                return;
+            }
+            
+            FT_LOG_INFO("ChunkedFileClient", "Using file-based storage: " << tempFilePath);
+            result.storage = std::move(fileStorage);
+        } else {
+            // Use memory storage for small files
+            FT_LOG_INFO("ChunkedFileClient", "Using memory-based storage");
+            result.storage = std::make_unique<MemoryStorage>();
+            
+            // Also keep legacy support
+            result.data.reserve(metadata.totalSize);
+        }
         
         // Step 2: Read chunks until we have all the data
         size_t chunkIndex = 0;
         int lastLoggedPercent = -1;
-        while (result.data.size() < metadata.totalSize) {
+        
+        while (result.storage->size() < metadata.totalSize) {
             if (!m_transferActive.load()) {
                 result.error = "Transfer cancelled";
                 return;
@@ -253,10 +286,10 @@ void ChunkedFileClient::receiveFileOnStream(
             
             auto chunkStart = std::chrono::steady_clock::now();
 
-            int currentPercent = static_cast<int>((100.0 * result.data.size()) / metadata.totalSize);
+            int currentPercent = static_cast<int>((100.0 * result.storage->size()) / metadata.totalSize);
             if (currentPercent / 10 > lastLoggedPercent / 10) {
                 lastLoggedPercent = currentPercent;
-                FT_LOG_INFO("ChunkedFileClient", "Reading chunk header for chunk " << chunkIndex << " (received " << result.data.size() << "/" << metadata.totalSize << " bytes so far)");
+                FT_LOG_INFO("ChunkedFileClient", "Reading chunk header for chunk " << chunkIndex << " (received " << result.storage->size() << "/" << metadata.totalSize << " bytes so far)");
             }
             // Read chunk header: [4 bytes chunk_index][4 bytes chunk_size]
             std::vector<uint8_t> header = readChunkFromStream(stream, 8, TransferConfig::getChunkTimeout());
@@ -269,13 +302,21 @@ void ChunkedFileClient::receiveFileOnStream(
                     // Likely stream failure - trigger recovery system
                     FT_LOG_WARNING("ChunkedFileClient", "Chunk timeout after " << elapsed.count() << "s - triggering recovery");
                     
-                    // Save checkpoint at current progress
+                    // Save checkpoint at current progress using unified storage
                     i2p::core::TransferCheckpoint checkpoint;
                     checkpoint.serverB32 = serverB32;
                     checkpoint.filename = filename;
                     checkpoint.totalSize = metadata.totalSize;
-                    checkpoint.bytesReceived = result.data.size();
-                    checkpoint.partialData = result.data;
+                    checkpoint.bytesReceived = result.storage->size();
+                    checkpoint.storagePath = result.storage->getStoragePath();
+                    
+                    // For large files, save storage path instead of data
+                    if (metadata.totalSize > LARGE_FILE_THRESHOLD) {
+                        checkpoint.partialData.clear(); // Don't save large data in checkpoint
+                    } else {
+                        checkpoint.partialData = result.getData(); // Use helper method
+                    }
+                    
                     checkpoint.lastUpdate = std::chrono::steady_clock::now();
                     checkpoint.attemptCount = 1;
                     
@@ -322,7 +363,18 @@ void ChunkedFileClient::receiveFileOnStream(
                 return;
             }
             
-            result.data.insert(result.data.end(), chunkData.begin(), chunkData.end());
+            // Write to unified storage
+            try {
+                result.storage->append(chunkData);
+            } catch (const std::exception& e) {
+                result.error = "Failed to write chunk " + std::to_string(chunkIndex) + " to storage: " + e.what();
+                return;
+            }
+            
+            // Also update legacy data for small files (backward compatibility)
+            if (metadata.totalSize <= LARGE_FILE_THRESHOLD) {
+                result.data.insert(result.data.end(), chunkData.begin(), chunkData.end());
+            }
             
             auto chunkEnd = std::chrono::steady_clock::now();
             auto chunkTime = std::chrono::duration_cast<std::chrono::milliseconds>(chunkEnd - chunkStart);
@@ -338,12 +390,11 @@ void ChunkedFileClient::receiveFileOnStream(
         }
         
         result.stats.chunksTotal = chunkIndex;
+        result.stats.totalBytes = result.storage->size();
         
-        result.stats.totalBytes = result.data.size();
-        
-        // Step 3: Verify data integrity
+        // Step 3: Verify data integrity using unified storage
         FT_LOG_INFO("ChunkedFileClient", "Verifying data integrity...");
-        result.stats.verified = verifyData(result.data, metadata);
+        result.stats.verified = result.storage->verify(metadata.sha256Checksum);
         
         if (!result.stats.verified) {
             result.error = "Data verification failed";
@@ -353,7 +404,7 @@ void ChunkedFileClient::receiveFileOnStream(
         result.success = true;
         result.stats.endTime = std::chrono::steady_clock::now();
         
-        FT_LOG_INFO("ChunkedFileClient", "File received successfully - " << result.stats.totalBytes << " bytes verified");
+        FT_LOG_INFO("ChunkedFileClient", "File received successfully - " << result.stats.totalBytes << " bytes verified at " << result.getStoragePath());
         
     } catch (const std::exception& e) {
         result.error = "Exception in receiveFileOnStream: " + std::string(e.what());
