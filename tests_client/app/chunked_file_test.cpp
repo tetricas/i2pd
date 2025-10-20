@@ -159,6 +159,19 @@ int runServer(int argc, char* argv[]) {
         
         if (!i2p::embed::I2PdUtils::waitForDestinationReady(serverDest, TransferConfig::getConnectionTimeout())) {
             std::cerr << "ERROR: Server destination not ready\n";
+            std::cerr << "This typically means:\n";
+            std::cerr << "1. No network connectivity to I2P network\n";
+            std::cerr << "2. No peer routers available for tunnel creation\n";
+            std::cerr << "3. For hops > 0: Start floodfill + peer routers first\n";
+            std::cerr << "Suggestion: Try --hops 0 for direct connection (only needs floodfill)\n";
+            
+            // Clean shutdown before exit
+            if (serverDest) {
+                serverDest->Stop();
+                serverDest.reset();
+            }
+            i2p::embed::I2PdUtils::shutdownRecoverySystems();
+            i2p::embed::I2PdUtils::stopCore();
             return 1;
         }
         
@@ -199,7 +212,16 @@ int runServer(int argc, char* argv[]) {
         }
         
         std::cout << "Server shutting down...\n";
+        
+        // Explicitly clean up server and destination before recovery shutdown
         server->stop();
+        server.reset();  // Destroy server first
+        if (serverDest) {
+            serverDest->Stop();  // Stop destination services
+            serverDest.reset();  // Release destination
+        }
+        
+        // Now safe to shutdown recovery systems
         i2p::embed::I2PdUtils::shutdownRecoverySystems();
         i2p::embed::I2PdUtils::stopCore();
         
@@ -300,6 +322,19 @@ int runClient(int argc, char* argv[]) {
         
         if (!i2p::embed::I2PdUtils::waitForDestinationReady(clientDest, TransferConfig::getConnectionTimeout())) {
             std::cerr << "ERROR: Client destination not ready\n";
+            std::cerr << "This typically means:\n";
+            std::cerr << "1. No network connectivity to I2P network\n";
+            std::cerr << "2. No peer routers available for tunnel creation\n";
+            std::cerr << "3. For hops > 0: Start floodfill + peer routers first\n";
+            std::cerr << "Suggestion: Try --hops 0 for direct connection (only needs floodfill)\n";
+            
+            // Clean shutdown before exit
+            if (clientDest) {
+                clientDest->Stop();
+                clientDest.reset();
+            }
+            i2p::embed::I2PdUtils::shutdownRecoverySystems();
+            i2p::embed::I2PdUtils::stopCore();
             return 1;
         }
         
@@ -338,6 +373,16 @@ int runClient(int argc, char* argv[]) {
         }
         
         FT_LOG_INFO("Client", "Client shutting down...");
+        
+        // Explicitly clean up client and destination before recovery shutdown
+        FT_LOG_INFO("Client", "Cleaning up client objects...");
+        client.reset();  // Destroy client first
+        if (clientDest) {
+            clientDest->Stop();  // Stop destination services
+            clientDest.reset();  // Release destination
+        }
+        
+        // Now safe to shutdown recovery systems
         i2p::embed::I2PdUtils::shutdownRecoverySystems();
         i2p::embed::I2PdUtils::stopCore();
         

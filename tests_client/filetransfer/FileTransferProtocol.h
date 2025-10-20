@@ -122,8 +122,8 @@ public:
         std::vector<uint8_t> data(size);
         
         // Create predictable pattern based on seed and position
-        std::hash<std::string> hasher;
-        uint32_t seedHash = static_cast<uint32_t>(hasher(seed));
+        constexpr std::hash<std::string> hasher;
+        const auto seedHash = static_cast<uint32_t>(hasher(seed));
         
         for (size_t i = 0; i < size; ++i) {
             // Create pseudo-random but reproducible pattern
