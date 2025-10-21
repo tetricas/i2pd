@@ -32,15 +32,6 @@ set(TRANSPORT_SOURCES
         transport/StreamingProviderRegistry.cpp
 )
 
-# Performance optimization layer (Session 10)
-set(PERFORMANCE_SOURCES
-        # Header-only performance modules - no .cpp files needed
-        # AdaptiveCompression.h
-        # BulkTransferOptimization.h  
-        # FileTypeDetection.h
-        # PerformanceOptimizedStreaming.h
-)
-
 # File transfer layer
 set(FILETRANSFER_SOURCES
         filetransfer/ChunkedFileClient.cpp

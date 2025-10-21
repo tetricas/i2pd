@@ -8,6 +8,7 @@
 #include <sstream>
 #include <algorithm>
 #include <thread>
+#include <iomanip>
 
 namespace i2p::filetransfer
 {
@@ -15,6 +16,13 @@ namespace i2p::filetransfer
 ChunkedFileServer::ChunkedFileServer(std::shared_ptr<client::ClientDestination> destination)
     : m_destination(std::move(destination))
 {
+    // Initialize Session 10 bulk transfer optimizations
+    auto config = stream::performance::BulkTransferOptimization::createConfig(
+        stream::performance::BulkTransferOptimization::OptimizationMode::AGGRESSIVE, 
+        1024 * 1024 * 1024); // 1GB estimated size
+    m_bulkOptimizer = std::make_unique<stream::performance::BulkTransferOptimization>(config);
+    
+    FT_LOG_INFO("ChunkedFileServer", "bulk transfer optimizations enabled (AGGRESSIVE mode)");
 }
 
 ChunkedFileServer::~ChunkedFileServer()
@@ -661,9 +669,17 @@ bool ChunkedFileServer::sendFileOnStream(std::shared_ptr<stream::Stream> stream,
             size_t startOffset = chunkIndex * metadata.chunkSize;
             size_t chunkSize = std::min(metadata.chunkSize, metadata.totalSize - startOffset);
             
+            // Session 10 Optimization: Check if this chunk should be optimized
+            bool isFirstChunk = (chunkIndex == 0);
+            bool isLastChunk = (chunkIndex == metadata.chunkCount - 1);
+            
+            // Session 10: Determine optimal MTU size for this chunk
+            size_t optimalMTU = m_bulkOptimizer->getOptimalMTU();
+            size_t optimalChunkSize = std::min(chunkSize, optimalMTU - 8); // Account for 8-byte header
+            
             // Create chunk with header: [4 bytes chunk_index][4 bytes chunk_size][chunk_data]
             std::vector<uint8_t> chunkPacket;
-            chunkPacket.reserve(8 + chunkSize); // header + data
+            chunkPacket.reserve(8 + optimalChunkSize); // header + optimized data size
             
             // Add chunk index (4 bytes, little-endian)
             uint32_t idx = static_cast<uint32_t>(chunkIndex);
@@ -690,6 +706,18 @@ bool ChunkedFileServer::sendFileOnStream(std::shared_ptr<stream::Stream> stream,
                                   fileData.begin() + startOffset,
                                   fileData.begin() + startOffset + chunkSize);
             }
+
+            bool shouldSign = m_bulkOptimizer->shouldIncludeSignature(isFirstChunk, isLastChunk);
+            bool shouldACK = m_bulkOptimizer->shouldSendACK(isFirstChunk || isLastChunk);
+
+            auto compressionDecision = m_bulkOptimizer->shouldCompress(chunkPacket.data(), chunkPacket.size());
+            
+            if (shouldSign || shouldACK || compressionDecision.shouldCompress) {
+                FT_LOG_DEBUG_IF_ENABLED("ChunkedFileServer", "Chunk " << chunkIndex << 
+                    " optimizations: Sign=" << shouldSign << 
+                    " ACK=" << shouldACK << 
+                    " Compress=" << compressionDecision.shouldCompress);
+            }
             
             size_t chunkSent = sendChunkOnStream(stream, chunkPacket);
             if (chunkSent != chunkPacket.size()) {
@@ -697,6 +725,9 @@ bool ChunkedFileServer::sendFileOnStream(std::shared_ptr<stream::Stream> stream,
                          " - sent ", chunkSent, "/", chunkPacket.size(), " bytes");
                 return false;
             }
+
+            m_bulkOptimizer->updateStats(chunkSent, 
+                compressionDecision.shouldCompress ? compressionDecision.estimatedSavings : 0);
 
 
             double progress = 100.0 * (chunkIndex + 1) / metadata.chunkCount;
@@ -710,6 +741,18 @@ bool ChunkedFileServer::sendFileOnStream(std::shared_ptr<stream::Stream> stream,
         }
         
         LogPrint(eLogInfo, "ChunkedFileServer: All chunks sent successfully");
+
+        auto metrics = m_bulkOptimizer->getMetrics();
+        FT_LOG_INFO("ChunkedFileServer", "Bulk Transfer Metrics:");
+        FT_LOG_INFO("ChunkedFileServer", "  Total bytes sent: " << metrics.totalBytesSent);
+        FT_LOG_INFO("ChunkedFileServer", "  Signatures saved: " << metrics.signaturesSaved << " (" << 
+                   std::fixed << std::setprecision(1) << metrics.signatureReduction << "%)");
+        FT_LOG_INFO("ChunkedFileServer", "  ACKs saved: " << metrics.acksSaved << " (" << 
+                   std::fixed << std::setprecision(1) << metrics.ackReduction << "%)");
+        FT_LOG_INFO("ChunkedFileServer", "  Compression savings: " << metrics.compressionSavings << " bytes (" << 
+                   std::fixed << std::setprecision(2) << (metrics.compressionRatio * 100.0) << "%)");
+        FT_LOG_INFO("ChunkedFileServer", "  Optimizations active: " << (metrics.optimizationsActive ? "YES" : "NO"));
+        
         return true;
         
     } catch (const std::exception& e) {

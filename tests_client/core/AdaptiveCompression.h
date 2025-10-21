@@ -229,9 +229,9 @@ public:
 };
 
 // Static member definitions
-const double AdaptiveCompression::ENTROPY_THRESHOLD = 0.7;
-const size_t AdaptiveCompression::BINARY_DETECTION_SAMPLE = 1024;
-const size_t AdaptiveCompression::ENTROPY_CALCULATION_SAMPLE = 512;
+inline const double AdaptiveCompression::ENTROPY_THRESHOLD = 0.7;
+inline const size_t AdaptiveCompression::BINARY_DETECTION_SAMPLE = 1024;
+inline const size_t AdaptiveCompression::ENTROPY_CALCULATION_SAMPLE = 512;
 
 } // namespace performance  
 } // namespace stream

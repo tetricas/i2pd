@@ -3,6 +3,7 @@
 #include "FileTransferProtocol.h"
 #include "Destination.h"
 #include "Streaming.h"
+#include "../core/BulkTransferOptimization.h"
 #include <memory>
 #include <string>
 #include <vector>
@@ -29,6 +30,9 @@ private:
     std::unique_ptr<embed::SimpleStreamServer> m_server;
     std::atomic<bool> m_running{false};
     mutable std::string m_lastStatus;
+    
+    // Session 10 Performance Optimizations
+    std::unique_ptr<stream::performance::BulkTransferOptimization> m_bulkOptimizer;
     
     // File storage
     std::map<std::string, std::vector<uint8_t>> m_files;

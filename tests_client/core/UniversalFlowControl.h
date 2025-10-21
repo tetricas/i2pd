@@ -46,11 +46,11 @@ public:
     static void RefreshConfiguration();
     
 private:
-    // Universal safe defaults that work on all networks
+    // Universal safe defaults that work on all networks  
     static const int SAFE_DEFAULT_RATE = 500;    // msg/s - works everywhere
-    static const int OPTIMAL_MAX_RATE = 2000;    // msg/s - only when ideal
+    static const int OPTIMAL_MAX_RATE = 4000;    // msg/s - increased for local i2p testing
     static const int UNIVERSAL_DELAY_US = 50;    // microseconds - baseline
-    static const int AGGRESSIVE_DELAY_US = 10;   // microseconds - for optimal conditions
+    static const int AGGRESSIVE_DELAY_US = 5;    // microseconds - optimized for local i2p (was 10)
     static const int CONSERVATIVE_DELAY_US = 100; // microseconds - for poor conditions
     
     // Current configuration
