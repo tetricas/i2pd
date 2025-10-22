@@ -255,6 +255,7 @@ namespace stream
 
 			void SavePacket (Packet * packet);
 			void ProcessPacket (Packet * packet);
+			void ProcessSavedPackets ();
 			bool ProcessOptions (uint16_t flags, Packet * packet);
 			void ProcessAck (Packet * packet);
 			size_t ConcatenatePackets (uint8_t * buf, size_t len);

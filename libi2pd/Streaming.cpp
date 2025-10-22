@@ -254,8 +254,12 @@ namespace stream
 			ProcessPacket (packet);
 			if (m_Status == eStreamStatusTerminated) return;
 			
-			// we should also try stored messages if any
-			for (auto it = m_SavedPackets.begin (); it != m_SavedPackets.end ();)
+			// Process saved packets in larger batches to reduce buffering delays
+			int processedCount = 0;
+			// AGGRESSIVE batch size for high-throughput transfers - process up to 4096 packets per iteration
+			// This dramatically reduces buffering delays during bulk file transfers
+			const int MAX_BATCH_SIZE = 4096;
+			for (auto it = m_SavedPackets.begin (); it != m_SavedPackets.end () && processedCount < MAX_BATCH_SIZE;)
 			{
 				if ((*it)->GetSeqn () == (uint32_t)(m_LastReceivedSequenceNumber + 1))
 				{
@@ -263,10 +267,16 @@ namespace stream
 					m_SavedPackets.erase (it++);
 
 					ProcessPacket (savedPacket);
+					processedCount++;
 					if (m_Status == eStreamStatusTerminated) return;
 				}
 				else
 					break;
+			}
+			
+			// Log batch processing for optimization tracking
+			if (processedCount > 0) {
+				LogPrint (eLogDebug, "Streaming: Processed batch of ", processedCount, " saved packets, ", m_SavedPackets.size(), " remaining");
 			}
 
 			// schedule ack for last message
@@ -363,8 +373,53 @@ namespace stream
 
 	void Stream::SavePacket (Packet * packet)
 	{
+		// Prevent memory exhaustion from excessive saved packets
+		if (m_SavedPackets.size() >= 16384) { // 16K packet limit vs unlimited accumulation
+			LogPrint (eLogWarning, "Streaming: SavedPackets limit reached (", m_SavedPackets.size(), ") - dropping packet ", packet->GetSeqn());
+			m_LocalDestination.DeletePacket (packet);
+			return;
+		}
+		
 		if (!m_SavedPackets.insert (packet).second)
 			m_LocalDestination.DeletePacket (packet);
+		
+		// Trigger aggressive batch processing during high-throughput periods
+		// When we accumulate many saved packets, immediately try to process them
+		if (m_SavedPackets.size() >= 1024) { // High-throughput threshold
+			LogPrint (eLogDebug, "Streaming: High-throughput detected (", m_SavedPackets.size(), " saved packets) - triggering batch processing");
+			ProcessSavedPackets();
+		}
+	}
+
+	void Stream::ProcessSavedPackets ()
+	{
+		// Aggressive batch processing for high-throughput transfers
+		int processedCount = 0;
+		const int MAX_BATCH_SIZE = 4096; // Process up to 4K packets per call
+		
+		for (auto it = m_SavedPackets.begin (); it != m_SavedPackets.end () && processedCount < MAX_BATCH_SIZE;)
+		{
+			if ((*it)->GetSeqn () == (uint32_t)(m_LastReceivedSequenceNumber + 1))
+			{
+				Packet * savedPacket = *it;
+				m_SavedPackets.erase (it++);
+				
+				ProcessPacket (savedPacket);
+				processedCount++;
+				if (m_Status == eStreamStatusTerminated) return;
+			}
+			else
+				break;
+		}
+		
+		// Log aggressive batch processing results and wake up any waiting receives
+		if (processedCount > 0) {
+			LogPrint (eLogDebug, "Streaming: Aggressive batch processed ", processedCount, " saved packets, ", m_SavedPackets.size(), " remaining");
+			// Wake up any blocked receives immediately after aggressive processing
+			if (!m_ReceiveQueue.empty()) {
+				m_ReceiveTimer.cancel();
+			}
+		}
 	}
 
 	void Stream::ProcessPacket (Packet * packet)
@@ -2146,7 +2201,7 @@ namespace stream
 				{
 					m_LastStream = std::make_shared<Stream> (m_Owner->GetService (), *this);
 					std::string streams;
-					for (const auto id: m_Streams | std::views::keys) {
+					for (const auto& [id, stream]: m_Streams) {
 						streams += std::to_string(id) + ", ";
 					}
 					LogPrint (eLogDebug, "Streaming: Can't find stream in ", streams);
