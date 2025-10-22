@@ -237,17 +237,7 @@ TransferConfigBuilder& TransferConfigBuilder::useSecurePreset()
     return *this;
 }
 
-TransferConfigBuilder& TransferConfigBuilder::useDebugPreset()
-{
-    m_config.enableProgressReporting = true;
-    m_config.progressUpdateIntervalMs = 1000;
-    m_config.maxRetries = 1; // Fail fast for debugging
-    m_config.connectionTimeoutMs = 10000;
-    m_config.transferTimeoutMs = 30000;
-    
-    FT_LOG_DEBUG("TransferConfigBuilder", "Applied debug preset");
-    return *this;
-}
+
 
 bool TransferConfigBuilder::isValid() const
 {
@@ -484,8 +474,12 @@ AdvancedTransferConfig TransferConfigValidator::getRecommendedConfig(const std::
             .usingStrategy("chunked")
             .buildUnsafe();
     } else if (useCase == "debug") {
+        // Debug configuration - fail fast with minimal timeouts
         return TransferConfigBuilder::fromDefaults()
-            .useDebugPreset()
+            .withMaxRetries(1)
+            .withConnectionTimeout(10000)
+            .withTransferTimeout(30000)
+            .enableProgressReporting(true)
             .buildUnsafe();
     }
     

@@ -2,6 +2,7 @@
 #include "FileTransferProtocol.h"
 #include "../core/FileTransferLogging.h"
 #include "../core/TransferConfig.h"
+#include "../test/MockFileUtils.h"
 #include "Log.h"
 #include "Identity.h"
 #include <sstream>
@@ -44,7 +45,7 @@ void NormalStreamingFileServer::addMockFile(const std::string& filename, const s
 void NormalStreamingFileServer::generateMockFile(const std::string& filename, size_t size, const std::string& seed)
 {
     std::string actualSeed = seed.empty() ? filename : seed;
-    auto data = ProtocolUtils::generateMockFile(size, actualSeed);
+    auto data = i2p::filetransfer::test::MockFileUtils::generateMockFile(size, actualSeed);
     addMockFile(filename, data);
 }
 

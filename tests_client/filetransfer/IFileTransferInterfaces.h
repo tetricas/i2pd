@@ -70,24 +70,34 @@ public:
     virtual ~IFileManager() = default;
     
     /**
-     * @brief Add a file to manage
+     * @brief Get list of available files
+     */
+    [[nodiscard]] virtual std::vector<std::string> getFileList() const = 0;
+};
+
+/**
+ * @brief Test interface for mock file operations
+ * @note Separated from production interfaces to avoid test code in production APIs
+ */
+class IMockFileManager
+{
+public:
+    virtual ~IMockFileManager() = default;
+    
+    /**
+     * @brief Add a mock file to serve (for testing)
      * @param filename Name of the file
      * @param data File content
      */
     virtual void addMockFile(const std::string& filename, const std::vector<uint8_t>& data) = 0;
     
     /**
-     * @brief Generate and add a file with specified size
+     * @brief Generate and add a mock file with specified size (for testing)
      * @param filename Name of the file
      * @param size Size in bytes
      * @param seed Random seed for content generation
      */
     virtual void generateMockFile(const std::string& filename, size_t size, const std::string& seed = "") = 0;
-    
-    /**
-     * @brief Get list of available files
-     */
-    [[nodiscard]] virtual std::vector<std::string> getFileList() const = 0;
 };
 
 /**
@@ -131,7 +141,7 @@ public:
 };
 
 /**
- * @brief Composed interface for file transfer servers
+ * @brief Composed interface for file transfer servers (production)
  * Uses Interface Segregation Principle - only depends on what it needs
  */
 class IFileTransferServer : public IFileManager, 
@@ -141,6 +151,16 @@ class IFileTransferServer : public IFileManager,
 {
 public:
     virtual ~IFileTransferServer() = default;
+};
+
+/**
+ * @brief Extended interface for file transfer servers with test capabilities
+ * @note Use this for testing, IFileTransferServer for production
+ */
+class ITestFileTransferServer : public IFileTransferServer, public IMockFileManager
+{
+public:
+    virtual ~ITestFileTransferServer() = default;
 };
 
 } // namespace i2p::filetransfer

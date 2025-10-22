@@ -435,41 +435,46 @@ std::vector<uint8_t> ChunkedFileClient::readChunkFromStream(std::shared_ptr<stre
     std::vector<uint8_t> buffer(expectedSize);
     size_t totalBytesRead = 0;
     
-    // Read in a loop until we get all expected bytes or timeout
-    int remainingTimeout = timeout_ms;
+    // Use short-timeout Receive() calls to process chunks as they arrive
+    // This maintains packet ordering while avoiding long buffering delays
     auto startTime = std::chrono::steady_clock::now();
+    const int CHUNK_TIMEOUT = 1000; // 1 second timeout for responsive chunk processing
+    int maxAttempts = timeout_ms / CHUNK_TIMEOUT;
+    int attempts = 0;
     
-    while (totalBytesRead < expectedSize && remainingTimeout > 0) {
-        size_t bytesRead = stream->Receive(buffer.data() + totalBytesRead, 
-                                         expectedSize - totalBytesRead, 
-                                         std::min(remainingTimeout, 1000)); // Max 1 second per read
+    while (totalBytesRead < expectedSize && attempts < maxAttempts) {
+        size_t remaining = expectedSize - totalBytesRead;
+        
+        // Use short-timeout Receive() for incremental reading
+        size_t bytesRead = stream->Receive(buffer.data() + totalBytesRead, remaining, CHUNK_TIMEOUT);
         
         if (bytesRead > 0) {
             totalBytesRead += bytesRead;
-            FT_LOG_DEBUG_IF_ENABLED("ChunkedFileClient", "Read " << bytesRead << " bytes (" << totalBytesRead << "/" << expectedSize << ")");
+            FT_LOG_DEBUG_IF_ENABLED("ChunkedFileClient", "Receive: " << bytesRead << " bytes (" << totalBytesRead << "/" << expectedSize << ")");
+            attempts = 0; // Reset attempts on successful read
         } else {
-            // No data received, check if we should continue waiting
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - startTime).count();
-            remainingTimeout = timeout_ms - static_cast<int>(elapsed);
-            
-            if (remainingTimeout <= 0) {
-                LogPrint(eLogWarning, "ChunkedFileClient: Timeout reading chunk data, got ", totalBytesRead, "/", expectedSize, " bytes after ", elapsed, "ms");
-                break;
+            attempts++;
+            // Brief progress update without breaking immediately
+            if (attempts % 5 == 0) { // Every 5 seconds
+                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - startTime).count();
+                FT_LOG_DEBUG_IF_ENABLED("ChunkedFileClient", "Waiting for data: " 
+                    << totalBytesRead << "/" << expectedSize << " bytes after " << elapsed << "ms");
             }
-            
-            // Brief pause before retry, but be more persistent
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            FT_LOG_DEBUG_IF_ENABLED("ChunkedFileClient", "Waiting for more data, " << totalBytesRead << "/" << expectedSize << " bytes, " << remainingTimeout << "ms remaining");
         }
     }
     
     if (totalBytesRead == expectedSize) {
-        FT_LOG_DEBUG_IF_ENABLED("ChunkedFileClient", "Successfully read complete chunk: " << totalBytesRead << " bytes");
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - startTime).count();
+        FT_LOG_DEBUG_IF_ENABLED("ChunkedFileClient", "Receive success: " << totalBytesRead << " bytes in " << elapsed << "ms");
         return buffer;
     } else {
-        FT_LOG_ERROR("ChunkedFileClient", "Failed to read complete chunk - expected " << expectedSize << ", got " << totalBytesRead << " bytes");
-        buffer.resize(totalBytesRead); // Return partial data
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - startTime).count();
+        FT_LOG_WARNING("ChunkedFileClient", "Receive partial read - expected " << expectedSize 
+            << ", got " << totalBytesRead << " bytes after " << elapsed << "ms (" << attempts << " timeouts)");
+        buffer.resize(totalBytesRead);
         return buffer;
     }
 }

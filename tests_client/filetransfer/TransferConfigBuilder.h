@@ -117,7 +117,7 @@ public:
     // Preset configurations
     TransferConfigBuilder& useHighPerformancePreset();
     TransferConfigBuilder& useSecurePreset();
-    TransferConfigBuilder& useDebugPreset();
+
     
     // Validation and building
     [[nodiscard]] bool isValid() const;

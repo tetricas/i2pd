@@ -163,7 +163,11 @@ std::string NormalStreamClient::receiveFromStream(std::shared_ptr<stream::Stream
         }
     }
     
-    // Process remaining buffer
+    // Process remaining buffer using ReadSome() for final cleanup
+    // NOTE: ReadSome() was part of Session 15 optimization experiments
+    // It bypasses i2p streaming layer packet ordering and caused data corruption in bulk transfers
+    // Safe to use here only for final buffer cleanup after proper Receive() calls
+    // For bulk file transfers, ChunkedFileClient uses proper Receive() with short timeouts instead
     while (const size_t len = stream->ReadSome(recv_buf.data(), recv_buf.size()))
         data.append(reinterpret_cast<char*>(recv_buf.data()), len);
     

@@ -4,6 +4,7 @@
 #include "../core/FileTransferLogging.h"
 #include "../core/TransferConfig.h"
 #include "../core/UniversalFlowControl.h"
+#include "../test/MockFileUtils.h"
 #include "Log.h"
 #include <sstream>
 #include <algorithm>
@@ -71,7 +72,7 @@ void ChunkedFileServer::generateMockFile(const std::string& filename, size_t siz
                    << metadata.chunkCount << " chunks, checksum: " << metadata.sha256Checksum.substr(0, 8) << "...)");
     } else {
         // Use regular in-memory generation for smaller files
-        auto data = ProtocolUtils::generateMockFile(size, actualSeed);
+        auto data = i2p::filetransfer::test::MockFileUtils::generateMockFile(size, actualSeed);
         addMockFile(filename, data);
     }
 }
