@@ -58,7 +58,9 @@ void I2PdUtils::startCore()
     log::Logger().Start();
     FT_LOG_INFO("I2PdUtils", "Starting NetDB");
     data::netdb.Start();
-    transport::transports.Start(true, false); // NTCP2 on, SSU2 off
+    bool ntcp2; i2p::config::GetOption("ntcp2.enabled", ntcp2);
+    bool ssu2; i2p::config::GetOption("ssu2.enabled", ssu2);
+    transport::transports.Start(ntcp2, ssu2);
     if (transport::transports.IsBoundNTCP2()) {
         FT_LOG_INFO("I2PdUtils", "Transports started");
         verifyNTCP2Published();

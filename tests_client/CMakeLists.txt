@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.12)
 project(i2pd_performance_tests)
 
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
 find_package(Boost REQUIRED COMPONENTS system filesystem program_options)
 find_package(OpenSSL REQUIRED)
 find_package(ZLIB REQUIRED)
@@ -9,6 +12,7 @@ find_package(Threads REQUIRED)
 include_directories(. core transport filetransfer app)
 include_directories(${CMAKE_SOURCE_DIR}/../libi2pd_client)
 include_directories(${CMAKE_SOURCE_DIR}/../libi2pd)
+include_directories(${CMAKE_SOURCE_DIR}/../i18n)
 
 # Core utilities
 set(CORE_SOURCES
@@ -80,6 +84,22 @@ target_link_libraries(chunked_file_test
         libi2pdclient
         libi2pd
         libi2pdlang
+        Boost::system Boost::filesystem Boost::program_options
+        OpenSSL::SSL OpenSSL::Crypto
+        ZLIB::ZLIB
+        Threads::Threads
+)
+
+add_executable(tunnel_echo_test app/tunnel_echo_test.cpp ${CORE_SOURCES} ${APP_SOURCES})
+target_include_directories(tunnel_echo_test PRIVATE
+        ${CMAKE_SOURCE_DIR}/libi2pd_client
+        ${CMAKE_SOURCE_DIR}/libi2pd
+)
+
+target_link_libraries(tunnel_echo_test
+        ${CMAKE_SOURCE_DIR}/../libi2pdclient.a
+        ${CMAKE_SOURCE_DIR}/../libi2pd.a
+        ${CMAKE_SOURCE_DIR}/../libi2pdlang.a
         Boost::system Boost::filesystem Boost::program_options
         OpenSSL::SSL OpenSSL::Crypto
         ZLIB::ZLIB
