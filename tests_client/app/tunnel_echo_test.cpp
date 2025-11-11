@@ -6,6 +6,9 @@
 #include <memory>
 #include <atomic>
 #include <cstdlib>
+#include <fstream>
+#include <sstream>
+#include <vector>
 
 #include "../core/I2PdUtils.h"
 #include "../core/TransferConfig.h"
@@ -20,30 +23,73 @@
 #include "Timestamp.h"
 
 using namespace i2p::filetransfer;
-
 using namespace std::chrono_literals;
-
-// Protocol constants for tunnel echo test
 namespace TunnelEcho {
-    const uint8_t PROTOCOL_TYPE_TUNNEL_ECHO = 200;  // Custom protocol type
-    const uint16_t ECHO_PORT = 8888;
-    const uint16_t CLIENT_PORT = 8889;
-    
-    // Simple message types
+    constexpr uint16_t ECHO_PORT = 8888;
+    constexpr uint16_t CLIENT_PORT = 8889;
     enum MessageType : uint8_t {
-        ECHO_REQUEST = 1,
-        ECHO_RESPONSE = 2,
-        TUNNEL_INFO = 3
+        TUNNEL_WARM_UP = 1,
+        FILE_TRANSFER_REQUEST = 2,
+        FILE_METADATA = 3,
+        FILE_CHUNK = 4,
+        FILE_TRANSFER_OK = 5
     };
     
-    // Simple echo message structure
     struct EchoMessage {
-        uint8_t type;           // MessageType
-        uint32_t sequenceId;    // Message sequence number
-        uint64_t timestamp;     // Timestamp for RTT measurement
-        uint32_t dataSize;      // Payload size
-        uint8_t data[];         // Variable payload
+        uint8_t type;
+        uint32_t sequenceId;
+        uint64_t timestamp;
+        uint32_t dataSize;
+        uint8_t data[];
     } __attribute__((packed));
+    struct FileInfo {
+        std::string filename;
+        size_t size;
+        std::string checksum;
+        std::vector<uint8_t> data;
+    };
+    uint32_t calculateCRC32(const std::vector<uint8_t>& data) {
+        uint32_t crc = 0xFFFFFFFF;
+        for (uint8_t byte : data) {
+            crc ^= byte;
+            for (int i = 0; i < 8; i++) {
+                if (crc & 1) {
+                    crc = (crc >> 1) ^ 0xEDB88320;
+                } else {
+                    crc >>= 1;
+                }
+            }
+        }
+        return ~crc;
+    }
+    FileInfo readFile(const std::string& filepath) {
+        FileInfo info;
+        info.filename = filepath.substr(filepath.find_last_of("/\\") + 1);
+        
+        std::ifstream file(filepath, std::ios::binary);
+        if (!file.is_open()) {
+            throw std::runtime_error("Cannot open file: " + filepath);
+        }
+        
+        // Read entire file
+        file.seekg(0, std::ios::end);
+        size_t fileSize = file.tellg();
+        file.seekg(0, std::ios::beg);
+        
+        info.data.resize(fileSize);
+        file.read(reinterpret_cast<char*>(info.data.data()), fileSize);
+        file.close();
+        
+        info.size = fileSize;
+        
+        // Calculate checksum
+        uint32_t crc = calculateCRC32(info.data);
+        std::stringstream ss;
+        ss << std::hex << crc;
+        info.checksum = ss.str();
+        
+        return info;
+    }
 }
 
 class SSU2PreferringTunnelPool : public i2p::tunnel::TunnelPool {
@@ -73,7 +119,6 @@ public:
             return tunnel;
         }
         
-        // Fallback to any available tunnel
         std::cout << "SSU2 tunnel not available, using fallback\n";
         return TunnelPool::GetNextOutboundTunnel(excluded);
     }
@@ -92,7 +137,6 @@ public:
             return tunnel;
         }
         
-        // Fallback to any available tunnel
         std::cout << "SSU2 tunnel not available, using fallback\n";
         return TunnelPool::GetNextInboundTunnel(excluded);
     }
@@ -105,23 +149,14 @@ public:
         : m_Owner(owner), m_IsServer(isServer), m_Hops(hops), 
           m_SequenceId(0), m_MessagesReceived(0), m_MessagesSent(0) 
     {
-        std::cout << "Created tunnel echo manager (" 
-                  << (isServer ? "server" : "client") << ") with " 
-                  << hops << " hops\n";
     }
     
     void Start() {
-        std::cout << "Starting tunnel echo manager...\n";
         
-        // Create SSU2-preferring tunnel pool
         CreateSSU2TunnelPool();
-        
-        // Get the client destination's datagram destination
-        // Use eDatagramV1 to support non-ratchet sessions
         auto datagramDestination = m_Owner->CreateDatagramDestination(false, i2p::datagram::eDatagramV1);
         std::cout << "Created datagram destination: " << (datagramDestination ? "SUCCESS" : "FAILED") << std::endl;
         
-        // Set up message receiver using std::bind (like other I2P applications)
         datagramDestination->SetReceiver(std::bind(&TunnelEchoManager::HandleDatagramReceive, this,
             std::placeholders::_1, std::placeholders::_2, std::placeholders::_3, 
             std::placeholders::_4, std::placeholders::_5), TunnelEcho::ECHO_PORT);
@@ -147,31 +182,79 @@ public:
     
     uint32_t GetMessagesSent() const { return m_MessagesSent; }
     uint32_t GetMessagesReceived() const { return m_MessagesReceived; }
+    bool ShouldExit() const { return m_ShouldExit; }
     
-    void HandleDatagramReceive(const i2p::data::IdentityEx& from, uint16_t fromPort, uint16_t toPort,
-                              const uint8_t* buf, size_t len) {
-        std::cout << "DEBUG: Received datagram from " << from.GetIdentHash().ToBase32().substr(0, 8) 
-                  << "... fromPort=" << fromPort << " toPort=" << toPort << " len=" << len << std::endl;
-        HandleMessage(from.GetIdentHash(), fromPort, toPort, buf, len);
-    }
-    
-    void SendEchoRequest(const i2p::data::IdentHash& to, const std::string& payload) {
-        if (!m_IsServer) {
-            auto message = CreateEchoMessage(TunnelEcho::ECHO_REQUEST, payload);
-            SendMessage(to, message);
-            ++m_MessagesSent;
-            std::cout << "Sent echo request #" << m_SequenceId 
-                      << " to " << to.ToBase32().substr(0, 8) << "... "
-                      << "(" << payload.size() << " bytes)\n";
+    void LoadFile(const std::string& filepath) {
+        try {
+            m_FileInfo = TunnelEcho::readFile(filepath);
+            m_HasFile = true;
+            std::cout << "Loaded file: " << m_FileInfo.filename 
+                      << " (" << m_FileInfo.size << " bytes, checksum: " 
+                      << m_FileInfo.checksum << ")\n";
+        } catch (const std::exception& e) {
+            std::cerr << "Failed to load file " << filepath << ": " << e.what() << "\n";
+            m_HasFile = false;
         }
     }
     
-    void SendTunnelInfo(const i2p::data::IdentHash& to) {
-        std::string info = GetTunnelInfo();
-        auto message = CreateEchoMessage(TunnelEcho::TUNNEL_INFO, info);
-        SendMessage(to, message);
-        std::cout << "Sent tunnel info to " << to.ToBase32().substr(0, 8) << "...\n";
+    void SendAllChunks(const i2p::data::IdentHash& to) {
+        if (!m_HasFile) {
+            return;
+        }
+        
+        // Send all chunks iteratively to avoid stack overflow
+        while (m_BytesSent < m_FileInfo.data.size()) {
+            size_t remainingBytes = m_FileInfo.data.size() - m_BytesSent;
+            size_t chunkSize = std::min(remainingBytes, m_ChunkSize);
+            
+            std::string chunkData(
+                reinterpret_cast<const char*>(m_FileInfo.data.data() + m_BytesSent), 
+                chunkSize
+            );
+            
+            auto chunk = CreateEchoMessage(TunnelEcho::FILE_CHUNK, chunkData);
+            SendMessage(to, chunk);
+            ++m_MessagesSent;
+            
+            m_BytesSent += chunkSize;
+            
+                if ((m_MessagesSent - 1) % 1000 == 0) {
+                std::cout << "Sent FILE_CHUNK #" << m_SequenceId 
+                          << " (" << chunkSize << " bytes, " << m_BytesSent 
+                          << "/" << m_FileInfo.data.size() << ")\n";
+            }
+            
+        }
+        
+        std::cout << "File transfer complete! Sent " << m_BytesSent 
+                  << " bytes in " << (m_MessagesSent - 1) << " chunks\n";
     }
+    
+    void HandleDatagramReceive(const i2p::data::IdentityEx& from, uint16_t fromPort, uint16_t toPort,
+                              const uint8_t* buf, size_t len) {
+        HandleMessage(from.GetIdentHash(), fromPort, toPort, buf, len);
+    }
+    
+    void SendTunnelWarmUp(const i2p::data::IdentHash& to) {
+        if (!m_IsServer) {
+            auto message = CreateEchoMessage(TunnelEcho::TUNNEL_WARM_UP, "WARMUP");
+            SendMessage(to, message);
+            std::cout << "Sent TUNNEL_WARM_UP #" << m_SequenceId 
+                      << " to " << to.ToBase32().substr(0, 8) << "... (warmup)\n";
+        }
+    }
+    
+    void SendFileTransferRequest(const i2p::data::IdentHash& to, const std::string& filename) {
+        if (!m_IsServer) {
+            auto message = CreateEchoMessage(TunnelEcho::FILE_TRANSFER_REQUEST, filename);
+            SendMessage(to, message);
+            ++m_MessagesSent;
+            std::cout << "Sent FILE_TRANSFER_REQUEST #" << m_SequenceId 
+                      << " to " << to.ToBase32().substr(0, 8) << "... "
+                      << "(file: " << filename << ")\n";
+        }
+    }
+    
 
 private:
     std::shared_ptr<i2p::client::ClientDestination> m_Owner;
@@ -180,6 +263,19 @@ private:
     std::atomic<uint32_t> m_SequenceId;
     std::atomic<uint32_t> m_MessagesReceived;
     std::atomic<uint32_t> m_MessagesSent;
+    std::atomic<bool> m_ShouldExit{false};
+    TunnelEcho::FileInfo m_FileInfo;
+    bool m_HasFile{false};
+    
+    // Client-side file reception tracking
+    std::string m_ExpectedChecksum;
+    std::vector<uint8_t> m_ReceivedData;
+    size_t m_ExpectedFileSize{0};
+    
+    // Server-side chunking state
+    size_t m_ChunkSize{30720};  // 30KB chunks - testing near I2P datagram limits
+    size_t m_BytesSent{0};
+    i2p::data::IdentHash m_CurrentClient;
     
     void CreateSSU2TunnelPool() {
         // Create custom tunnel pool with SSU2 preference
@@ -197,7 +293,6 @@ private:
         // Note: TunnelPool is set automatically when creating ClientDestination
         // Custom tunnel pool management would require modifying ClientDestination internals
         
-        std::cout << "Created SSU2-preferring tunnel pool\n";
     }
     
     std::vector<uint8_t> CreateEchoMessage(TunnelEcho::MessageType type, const std::string& payload) {
@@ -244,30 +339,118 @@ private:
         }
         
         switch (msg->type) {
-            case TunnelEcho::ECHO_REQUEST:
-                ++m_MessagesReceived;
-                std::cout << "Received echo request #" << msg->sequenceId 
+            case TunnelEcho::TUNNEL_WARM_UP:
+                std::cout << "Received TUNNEL_WARM_UP #" << msg->sequenceId 
                           << " from " << from.ToBase32().substr(0, 8) << "... "
-                          << "(RTT: " << rtt << "ms, " << payload.size() << " bytes)\n";
+                          << "(RTT: " << rtt << "ms) - tunnel warmed up\n";
+                break;
+                
+            case TunnelEcho::FILE_TRANSFER_REQUEST:
+                ++m_MessagesReceived;
+                std::cout << "Received FILE_TRANSFER_REQUEST #" << msg->sequenceId 
+                          << " from " << from.ToBase32().substr(0, 8) << "... "
+                          << "(RTT: " << rtt << "ms, file: " << payload << ")\n";
                 if (m_IsServer) {
-                    // Send echo response
-                    const auto response = CreateEchoMessage(TunnelEcho::ECHO_RESPONSE, payload);
+                    if (!m_HasFile) {
+                        std::cerr << "Server: No file loaded for transfer\n";
+                        return;
+                    }
+                    
+                    m_BytesSent = 0;
+                    m_CurrentClient = from;
+                    
+                    std::cout << "Server: Sending FILE_METADATA response\n";
+                    std::stringstream metadata;
+                    metadata << "metadata:" << m_FileInfo.filename << ":" 
+                             << m_FileInfo.size << ":" << m_FileInfo.checksum;
+                    
+                    auto response = CreateEchoMessage(TunnelEcho::FILE_METADATA, metadata.str());
                     SendMessage(from, response);
                     ++m_MessagesSent;
-                    std::cout << "Sent echo response #" << m_SequenceId << "\n";
+                    std::cout << "Sent FILE_METADATA response #" << m_SequenceId 
+                              << " (file: " << m_FileInfo.filename << ", " << m_FileInfo.size << " bytes)\n";
+                    
+                    std::cout << "Server: Starting chunked transfer (" << m_ChunkSize << " byte chunks)\n";
+                    SendAllChunks(from);
                 }
                 break;
                 
-            case TunnelEcho::ECHO_RESPONSE:
+            case TunnelEcho::FILE_METADATA:
                 ++m_MessagesReceived;
-                std::cout << "Received echo response #" << msg->sequenceId 
-                          << " from " << from.ToBase32().substr(0, 8) << "... "
-                          << "(RTT: " << rtt << "ms, " << payload.size() << " bytes)\n";
+                std::cout << "Received FILE_METADATA from " << from.ToBase32().substr(0, 8) << "... "
+                          << "(data: " << payload << ")\n";
+                          
+                if (!m_IsServer && payload.find("metadata:") == 0) {
+                    std::stringstream ss(payload);
+                    std::string token;
+                    std::vector<std::string> parts;
+                    
+                    while (std::getline(ss, token, ':')) {
+                        parts.push_back(token);
+                    }
+                    
+                    if (parts.size() >= 4) {
+                        m_ExpectedFileSize = std::stoull(parts[2]);
+                        m_ExpectedChecksum = parts[3];
+                        m_ReceivedData.clear();
+                        m_ReceivedData.reserve(m_ExpectedFileSize);
+                        std::cout << "Client: Expecting file " << parts[1] 
+                                  << " (" << parts[2] << " bytes, checksum: " 
+                                  << m_ExpectedChecksum << ")\n";
+                    }
+                }
                 break;
                 
-            case TunnelEcho::TUNNEL_INFO:
-                std::cout << "Received tunnel info from " << from.ToBase32().substr(0, 8) << "...\n";
-                std::cout << "Tunnel Info: " << payload << "\n";
+            case TunnelEcho::FILE_CHUNK:
+                ++m_MessagesReceived;
+                          
+                if (!m_IsServer) {
+                    m_ReceivedData.insert(m_ReceivedData.end(), payload.begin(), payload.end());
+                    
+                                if (m_MessagesReceived % 1000 == 0) {
+                        std::cout << "Client: Accumulated " << m_ReceivedData.size() 
+                                  << "/" << m_ExpectedFileSize << " bytes (" << m_MessagesReceived << " chunks)\n";
+                    }
+                    
+                    if (m_ReceivedData.size() >= m_ExpectedFileSize) {
+                        std::cout << "Client: File transfer complete, verifying checksum...\n";
+                        
+                        uint32_t receivedCRC = TunnelEcho::calculateCRC32(m_ReceivedData);
+                        std::stringstream ss;
+                        ss << std::hex << receivedCRC;
+                        std::string receivedChecksum = ss.str();
+                        
+                        std::cout << "  Expected: " << m_ExpectedChecksum << "\n";
+                        std::cout << "  Received: " << receivedChecksum << "\n";
+                        
+                        std::string response;
+                        if (receivedChecksum == m_ExpectedChecksum) {
+                            std::cout << "Client: Checksum verification PASSED\n";
+                            response = "checksum_ok";
+                        } else {
+                            std::cout << "Client: Checksum verification FAILED\n";
+                            response = "checksum_failed";
+                        }
+                        
+                        std::cout << "Client: Sending FILE_TRANSFER_OK\n";
+                        auto ok = CreateEchoMessage(TunnelEcho::FILE_TRANSFER_OK, response);
+                        SendMessage(from, ok);
+                        ++m_MessagesSent;
+                        std::cout << "Sent FILE_TRANSFER_OK #" << m_SequenceId << "\n";
+                        std::cout << "Client: Transfer complete, shutting down\n";
+                        m_ShouldExit = true;
+                    }
+                }
+                break;
+                
+            case TunnelEcho::FILE_TRANSFER_OK:
+                ++m_MessagesReceived;
+                std::cout << "Received FILE_TRANSFER_OK from " << from.ToBase32().substr(0, 8) << "... "
+                          << "(data: " << payload << ")\n";
+                if (m_IsServer) {
+                    std::cout << "Server: Transfer complete, shutting down\n";
+                    m_ShouldExit = true;
+                }
                 break;
                 
             default:
@@ -313,7 +496,6 @@ void printUsage(const char* program) {
     std::cout << "  --server-b32 <addr> Server's base32 address\n";
     std::cout << "  --hops <N>          Tunnel hop count (default: 1, 0 = direct connection)\n";
     std::cout << "  --message <text>    Message to echo (default: 'Hello from tunnel echo test')\n";
-    std::cout << "  --count <N>         Number of echo requests to send (default: 5)\n\n";
     std::cout << "Examples:\n";
     std::cout << "  # Server with 0-hop (direct) connection\n";
     std::cout << "  " << program << " server --conf srv.conf --datadir /tmp/srv --hops 0\n\n";
@@ -325,6 +507,8 @@ void printUsage(const char* program) {
 }
 
 int runServer(const std::string& datadir, const std::string& config, int hops) {
+    // Default test file path
+    std::string testFile = "/tmp/testfile.txt";
     try {
         std::cout << "Initializing server node...\n";
         i2p::embed::I2PdUtils::initNode("server", datadir, config);
@@ -339,8 +523,12 @@ int runServer(const std::string& datadir, const std::string& config, int hops) {
             return 1;
         }
         
-        // Create tunnel echo server
         auto echoServer = std::make_shared<TunnelEchoManager>(serverDest, true, hops);
+        
+        // Load test file
+        std::cout << "Loading test file: " << testFile << "\n";
+        echoServer->LoadFile(testFile);
+        
         echoServer->Start();
         
         std::cout << "\n=== TUNNEL ECHO SERVER STARTED ===\n";
@@ -351,13 +539,18 @@ int runServer(const std::string& datadir, const std::string& config, int hops) {
         std::cout << "Press Ctrl+C to stop\n\n";
         
         // Wait for connections and handle echo requests
-        while (true) {
+        while (!echoServer->ShouldExit()) {
             std::this_thread::sleep_for(5s);
             
             // Send tunnel info periodically
             std::cout << "Server running... (messages received: " 
                       << echoServer->GetMessagesReceived() << ")\n";
         }
+        // Force clean exit to avoid any remaining mutex issues
+        std::cout << "Exiting cleanly...\n";
+        std::_Exit(0);  // Use _Exit to avoid atexit handlers that might cause issues
+
+        return 0;
         
     } catch (const std::exception& e) {
         std::cerr << "Server exception: " << e.what() << "\n";
@@ -367,7 +560,7 @@ int runServer(const std::string& datadir, const std::string& config, int hops) {
 
 int runClient(const std::string& datadir, const std::string& config, 
               const std::string& serverB32, int hops, 
-              const std::string& message, int count) {
+              const std::string& message) {
     try {
         std::cout << "Initializing client node...\n";
         i2p::embed::I2PdUtils::initNode("client", datadir, config);
@@ -400,7 +593,6 @@ int runClient(const std::string& datadir, const std::string& config,
         std::cout << "Protocol: Tunnel-based with SSU2 preference\n";
         std::cout << "Tunnel hops: " << hops << "\n";
         std::cout << "Message: \"" << message << "\"\n";
-        std::cout << "Count: " << count << "\n\n";
         
         // Wait for destination to be ready
         std::cout << "Waiting for destination to be ready...\n";
@@ -415,38 +607,47 @@ int runClient(const std::string& datadir, const std::string& config,
         std::cout << "Waiting for tunnel establishment...\n";
         std::this_thread::sleep_for(5s);
         
-        // Send tunnel initialization message to warm up the connection
-        std::cout << "Initializing tunnel with warmup message...\n";
-        echoClient->SendTunnelInfo(serverIdent);  // Use tunnel info as warmup
-        std::this_thread::sleep_for(3s);  // Wait for tunnel to process warmup
-        
-        // Send echo requests (now tunnels should be properly initialized)
-        std::cout << "Sending " << count << " echo requests...\n";
+        // Tunnel is ready, proceed with file transfer protocol
         auto startTime = std::chrono::high_resolution_clock::now();
         
-        for (int i = 1; i <= count; i++) {
-            std::string numberedMessage = message + " #" + std::to_string(i);
-            echoClient->SendEchoRequest(serverIdent, numberedMessage);
-            std::this_thread::sleep_for(1s);  // 1 second between requests
+        // Send FILE_TRANSFER_START message
+        std::cout << "Sending FILE_TRANSFER_START...\n";
+        echoClient->SendTunnelWarmUp(serverIdent);
+        std::this_thread::sleep_for(2s);
+        
+        // Send FILE_TRANSFER_REQUEST message
+        std::cout << "Sending FILE_TRANSFER_REQUEST...\n";
+        echoClient->SendFileTransferRequest(serverIdent, "testfile.bin");
+        std::this_thread::sleep_for(2s);
+        
+        // Wait for responses and file transfer completion
+        std::cout << "Waiting for file transfer to complete...\n";
+        
+        // Wait for completion or timeout
+        auto timeout = std::chrono::steady_clock::now() + std::chrono::seconds(3600);  // 1 hour timeout
+        int lastMessageCount = 0;
+        auto lastProgressTime = std::chrono::steady_clock::now();
+        
+        while (!echoClient->ShouldExit() && std::chrono::steady_clock::now() < timeout) {
+            std::this_thread::sleep_for(2s);  // Check every 2 seconds
+            
+            int currentMessages = echoClient->GetMessagesReceived();
+            auto currentTime = std::chrono::steady_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(currentTime - lastProgressTime).count();
+            
+            if (elapsed >= 5) {  // Report progress every 5 seconds
+                double messagesPerSec = (currentMessages - lastMessageCount) / double(elapsed);
+                std::cout << "Progress: " << currentMessages << " chunks received "
+                          << "(" << std::fixed << std::setprecision(1) << messagesPerSec << " chunks/sec)\n";
+                lastMessageCount = currentMessages;
+                lastProgressTime = currentTime;
+            }
         }
         
-        // Wait for responses (longer timeout for better reliability)
-        std::cout << "Waiting for responses...\n";
-        std::cout << "Allowing extra time for final message to be processed...\n";
-        std::this_thread::sleep_for(25s);  // Even longer timeout for final response
-        
-        // Final status check with polling for late arrivals
-        std::cout << "Final message count check...\n";
-        int lastCount = echoClient->GetMessagesReceived();
-        
-        // Poll for late messages for up to 5 seconds
-        for (int i = 0; i < 10; i++) {
-            std::this_thread::sleep_for(500ms);
-            int currentCount = echoClient->GetMessagesReceived();
-            if (currentCount > lastCount) {
-                std::cout << "Late message arrived! Count now: " << currentCount << "\n";
-                lastCount = currentCount;
-            }
+        if (echoClient->ShouldExit()) {
+            std::cout << "Transfer completed successfully!\n";
+        } else {
+            std::cout << "Transfer timed out after 1 hour\n";
         }
         
         auto endTime = std::chrono::high_resolution_clock::now();
@@ -484,7 +685,7 @@ int runClient(const std::string& datadir, const std::string& config,
         // Force clean exit to avoid any remaining mutex issues
         std::cout << "Exiting cleanly...\n";
         std::_Exit(0);  // Use _Exit to avoid atexit handlers that might cause issues
-        
+
         return 0;
         
     } catch (const std::exception& e) {
@@ -513,7 +714,6 @@ int main(int argc, char* argv[]) {
         // Client-specific arguments
         std::string serverB32 = "";
         std::string message = "Hello from tunnel echo test";
-        int count = 5;
         
         for (int i = 2; i < argc; i++) {
             std::string arg = argv[i];
@@ -528,8 +728,6 @@ int main(int argc, char* argv[]) {
                 serverB32 = argv[++i];
             } else if (arg == "--message" && i + 1 < argc) {
                 message = argv[++i];
-            } else if (arg == "--count" && i + 1 < argc) {
-                count = std::stoi(argv[++i]);
             } else {
                 std::cerr << "Unknown argument: " << arg << "\n";
                 printUsage(argv[0]);
@@ -537,21 +735,22 @@ int main(int argc, char* argv[]) {
             }
         }
         
-        if (mode == "server") {
+        if (mode == "server")
             return runServer(datadir, config, hops);
-        } else if (mode == "client") {
+
+        if (mode == "client")
+        {
             if (serverB32.empty()) {
                 std::cerr << "ERROR: Client mode requires --server-b32 argument\n";
                 printUsage(argv[0]);
                 return 1;
             }
-            return runClient(datadir, config, serverB32, hops, message, count);
-        } else {
-            std::cerr << "ERROR: Unknown mode: " << mode << "\n";
-            printUsage(argv[0]);
-            return 1;
+            return runClient(datadir, config, serverB32, hops, message);
         }
-        
+
+        std::cerr << "ERROR: Unknown mode: " << mode << "\n";
+        printUsage(argv[0]);
+        return 1;
     } catch (const std::exception& e) {
         std::cerr << "Exception: " << e.what() << "\n";
         return 1;
