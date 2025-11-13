@@ -9,6 +9,11 @@
 #include <fstream>
 #include <sstream>
 #include <vector>
+#include <set>
+#include <map>
+#include <queue>
+#include <mutex>
+#include <condition_variable>
 
 #include "../core/I2PdUtils.h"
 #include "../core/TransferConfig.h"
@@ -24,6 +29,8 @@
 
 using namespace i2p::filetransfer;
 using namespace std::chrono_literals;
+const std::string g_serverFileName = "/tmp/testfile.bin";
+const std::string g_receivedFileName = "/tmp/received_file.bin";
 namespace TunnelEcho {
     constexpr uint16_t ECHO_PORT = 8888;
     constexpr uint16_t CLIENT_PORT = 8889;
@@ -32,7 +39,8 @@ namespace TunnelEcho {
         FILE_TRANSFER_REQUEST = 2,
         FILE_METADATA = 3,
         FILE_CHUNK = 4,
-        FILE_TRANSFER_OK = 5
+        FILE_TRANSFER_OK = 5,
+        CHUNK_REQUEST = 6
     };
     
     struct EchoMessage {
@@ -46,44 +54,101 @@ namespace TunnelEcho {
         std::string filename;
         size_t size;
         std::string checksum;
-        std::vector<uint8_t> data;
+        std::string filepath;
     };
-    uint32_t calculateCRC32(const std::vector<uint8_t>& data) {
-        uint32_t crc = 0xFFFFFFFF;
-        for (uint8_t byte : data) {
-            crc ^= byte;
-            for (int i = 0; i < 8; i++) {
-                if (crc & 1) {
-                    crc = (crc >> 1) ^ 0xEDB88320;
-                } else {
-                    crc >>= 1;
-                }
-            }
-        }
-        return ~crc;
-    }
-    FileInfo readFile(const std::string& filepath) {
-        FileInfo info;
-        info.filename = filepath.substr(filepath.find_last_of("/\\") + 1);
-        
+
+    enum FileSize {
+        SMALL = 0,   // 10MB
+        MEDIUM = 1,  // 100MB  
+        LARGE = 2    // 1GB
+    };
+
+    struct FileSizeInfo {
+        const char* name;
+        size_t size;
+    };
+
+    constexpr FileSizeInfo FILE_SIZES[] = {
+        {"small", 10 * 1024 * 1024},      // 10MB
+        {"medium", 100 * 1024 * 1024},    // 100MB
+        {"large", 1024 * 1024 * 1024}     // 1GB
+    };
+    uint32_t calculateCRC32Stream(const std::string& filepath) {
         std::ifstream file(filepath, std::ios::binary);
         if (!file.is_open()) {
             throw std::runtime_error("Cannot open file: " + filepath);
         }
         
-        // Read entire file
-        file.seekg(0, std::ios::end);
-        size_t fileSize = file.tellg();
-        file.seekg(0, std::ios::beg);
+        uint32_t crc = 0xFFFFFFFF;
+        constexpr size_t BUFFER_SIZE = 65536;
+        std::vector<uint8_t> buffer(BUFFER_SIZE);
         
-        info.data.resize(fileSize);
-        file.read(reinterpret_cast<char*>(info.data.data()), fileSize);
+        while (file.read(reinterpret_cast<char*>(buffer.data()), BUFFER_SIZE) || file.gcount() > 0) {
+            size_t bytesRead = file.gcount();
+            for (size_t i = 0; i < bytesRead; i++) {
+                uint8_t byte = buffer[i];
+                crc ^= byte;
+                for (int j = 0; j < 8; j++) {
+                    if (crc & 1) {
+                        crc = (crc >> 1) ^ 0xEDB88320;
+                    } else {
+                        crc >>= 1;
+                    }
+                }
+            }
+        }
+        file.close();
+        return ~crc;
+    }
+
+    std::string generateTestFile(FileSize size) {
+        // Remove existing file
+        std::remove(g_serverFileName.c_str());
+        
+        size_t fileSize = FILE_SIZES[size].size;
+        std::ofstream file(g_serverFileName, std::ios::binary);
+        if (!file.is_open()) {
+            throw std::runtime_error("Cannot create test file: " + g_serverFileName);
+        }
+        
+        // Generate file with pattern data (not random for reproducibility)
+        constexpr size_t BUFFER_SIZE = 65536;
+        std::vector<uint8_t> buffer(BUFFER_SIZE);
+        
+        // Fill buffer with repeating pattern
+        for (size_t i = 0; i < BUFFER_SIZE; i++) {
+            buffer[i] = static_cast<uint8_t>((i * 73 + 17) % 256);
+        }
+        
+        size_t remaining = fileSize;
+        while (remaining > 0) {
+            size_t toWrite = std::min(remaining, BUFFER_SIZE);
+            file.write(reinterpret_cast<const char*>(buffer.data()), toWrite);
+            remaining -= toWrite;
+        }
+        
+        file.close();
+        std::cout << "Generated test file: " << FILE_SIZES[size].name 
+                  << " (" << fileSize << " bytes)\n";
+        
+        return g_serverFileName;
+    }
+
+    FileInfo getFileInfo(const std::string& filepath) {
+        FileInfo info;
+        info.filename = "testfile.bin";  // Standard name
+        info.filepath = filepath;
+        
+        // Get file size
+        std::ifstream file(filepath, std::ios::binary | std::ios::ate);
+        if (!file.is_open()) {
+            throw std::runtime_error("Cannot open file: " + filepath);
+        }
+        info.size = file.tellg();
         file.close();
         
-        info.size = fileSize;
-        
-        // Calculate checksum
-        uint32_t crc = calculateCRC32(info.data);
+        // Calculate checksum using streaming
+        uint32_t crc = calculateCRC32Stream(filepath);
         std::stringstream ss;
         ss << std::hex << crc;
         info.checksum = ss.str();
@@ -151,7 +216,8 @@ public:
     {
     }
     
-    void Start() {
+    void Start()
+    {
         
         CreateSSU2TunnelPool();
         auto datagramDestination = m_Owner->CreateDatagramDestination(false, i2p::datagram::eDatagramV1);
@@ -167,7 +233,8 @@ public:
         std::cout << "B32 Address: " << m_Owner->GetIdentHash().ToBase32() << ".b32.i2p\n";
     }
     
-    void Stop() {
+    void Stop()
+    {
         std::cout << "Stopping tunnel echo manager...\n";
         
         // Reset receiver
@@ -183,10 +250,31 @@ public:
     uint32_t GetMessagesSent() const { return m_MessagesSent; }
     uint32_t GetMessagesReceived() const { return m_MessagesReceived; }
     bool ShouldExit() const { return m_ShouldExit; }
+    bool IsTransferCompleted() const { return m_FileTransferComplete; }
+    uint64_t GetFileSize() const { return m_ExpectedFileSize; }
+    
+    void StopClientThreads() {
+        if (!m_IsServer) {
+            m_StopThreads = true;
+            m_HasNewChunks = true; // Wake up processor thread
+            
+            if (m_ChunkProcessorThread.joinable()) {
+                m_ChunkProcessorThread.join();
+            }
+            
+            if (m_GapDetectorThread.joinable()) {
+                m_GapDetectorThread.join();
+            }
+            
+            if (m_OutputFile.is_open()) {
+                m_OutputFile.close();
+            }
+        }
+    }
     
     void LoadFile(const std::string& filepath) {
         try {
-            m_FileInfo = TunnelEcho::readFile(filepath);
+            m_FileInfo = TunnelEcho::getFileInfo(filepath);
             m_HasFile = true;
             std::cout << "Loaded file: " << m_FileInfo.filename 
                       << " (" << m_FileInfo.size << " bytes, checksum: " 
@@ -202,32 +290,90 @@ public:
             return;
         }
         
-        // Send all chunks iteratively to avoid stack overflow
-        while (m_BytesSent < m_FileInfo.data.size()) {
-            size_t remainingBytes = m_FileInfo.data.size() - m_BytesSent;
+        // Send all chunks with proper chunk indexing based on file position
+        std::ifstream file(m_FileInfo.filepath, std::ios::binary);
+        if (!file.is_open()) {
+            std::cerr << "Cannot open file for reading: " << m_FileInfo.filepath << "\n";
+            return;
+        }
+        
+        std::vector<uint8_t> buffer(m_ChunkSize);
+        
+        uint32_t chunkIndex = 0;
+        
+        while (m_BytesSent < m_FileInfo.size) {
+            
+            size_t remainingBytes = m_FileInfo.size - m_BytesSent;
             size_t chunkSize = std::min(remainingBytes, m_ChunkSize);
             
-            std::string chunkData(
-                reinterpret_cast<const char*>(m_FileInfo.data.data() + m_BytesSent), 
-                chunkSize
-            );
+            file.read(reinterpret_cast<char*>(buffer.data()), chunkSize);
+            size_t bytesRead = file.gcount();
+            
+            if (bytesRead == 0) break;
+            
+            // Create chunk with header: chunkIndex(4) + chunkSize(4) + payload
+            std::string chunkData;
+            uint32_t bytesRead32 = static_cast<uint32_t>(bytesRead);
+            chunkData.append(reinterpret_cast<const char*>(&chunkIndex), sizeof(chunkIndex));
+            chunkData.append(reinterpret_cast<const char*>(&bytesRead32), sizeof(bytesRead32));
+            chunkData.append(reinterpret_cast<const char*>(buffer.data()), bytesRead);
+            
             
             auto chunk = CreateEchoMessage(TunnelEcho::FILE_CHUNK, chunkData);
             SendMessage(to, chunk);
             ++m_MessagesSent;
             
-            m_BytesSent += chunkSize;
+            m_BytesSent += bytesRead;
+            chunkIndex++;
             
-                if ((m_MessagesSent - 1) % 1000 == 0) {
-                std::cout << "Sent FILE_CHUNK #" << m_SequenceId 
-                          << " (" << chunkSize << " bytes, " << m_BytesSent 
-                          << "/" << m_FileInfo.data.size() << ")\n";
+            if (chunkIndex % 1000 == 0) {
+                std::cout << "Sent chunk " << chunkIndex 
+                          << " (" << bytesRead << " bytes, " << m_BytesSent 
+                          << "/" << m_FileInfo.size << ")\n";
             }
-            
         }
         
+        file.close();
         std::cout << "File transfer complete! Sent " << m_BytesSent 
-                  << " bytes in " << (m_MessagesSent - 1) << " chunks\n";
+                  << " bytes in " << chunkIndex << " chunks\n";
+    }
+    
+    void SendRequestedChunks(const i2p::data::IdentHash& to, const std::vector<uint32_t>& requestedChunks) {
+        std::ifstream file(m_FileInfo.filepath, std::ios::binary);
+        if (!file.is_open()) {
+            std::cerr << "Cannot open file for retransmission: " << m_FileInfo.filepath << "\n";
+            return;
+        }
+        
+        std::vector<uint8_t> buffer(m_ChunkSize);
+        
+        for (uint32_t chunkIndex : requestedChunks) {
+            size_t offset = chunkIndex * m_ChunkSize;
+            if (offset >= m_FileInfo.size) continue;
+            
+            file.seekg(offset);
+            size_t remainingBytes = m_FileInfo.size - offset;
+            size_t chunkSize = std::min(remainingBytes, m_ChunkSize);
+            
+            file.read(reinterpret_cast<char*>(buffer.data()), chunkSize);
+            size_t bytesRead = file.gcount();
+            
+            if (bytesRead == 0) continue;
+            
+            // Create chunk with header: chunkIndex(4) + chunkSize(4) + payload
+            std::string chunkData;
+            uint32_t bytesRead32 = static_cast<uint32_t>(bytesRead);
+            chunkData.append(reinterpret_cast<const char*>(&chunkIndex), sizeof(chunkIndex));
+            chunkData.append(reinterpret_cast<const char*>(&bytesRead32), sizeof(bytesRead32));
+            chunkData.append(reinterpret_cast<const char*>(buffer.data()), bytesRead);
+            
+            auto chunk = CreateEchoMessage(TunnelEcho::FILE_CHUNK, chunkData);
+            SendMessage(to, chunk);
+            ++m_MessagesSent;
+        }
+        
+        file.close();
+        std::cout << "Retransmitted " << requestedChunks.size() << " requested chunks\n";
     }
     
     void HandleDatagramReceive(const i2p::data::IdentityEx& from, uint16_t fromPort, uint16_t toPort,
@@ -271,12 +417,251 @@ private:
     std::string m_ExpectedChecksum;
     std::vector<uint8_t> m_ReceivedData;
     size_t m_ExpectedFileSize{0};
+    std::set<uint32_t> m_ReceivedChunks;
+    std::map<uint32_t, std::vector<uint8_t>> m_ChunkData;
+    uint32_t m_TotalExpectedChunks{0};
+    std::chrono::steady_clock::time_point m_LastProgressTime;
     
-    // Server-side chunking state
-    size_t m_ChunkSize{30720};  // 30KB chunks - testing near I2P datagram limits
+    // Server-side chunking state  
+    size_t m_ChunkSize{31744};  // 31KB chunks
     size_t m_BytesSent{0};
     i2p::data::IdentHash m_CurrentClient;
     
+    // Client-side processing
+    std::atomic<bool> m_FileTransferComplete{false};
+    std::atomic<bool> m_VerificationStarted{false};
+    std::thread m_ChunkProcessorThread;
+    std::thread m_GapDetectorThread;
+    std::atomic<bool> m_StopThreads{false};
+    
+    // Lock-free chunk queue
+    struct ChunkItem {
+        uint32_t index;
+        std::vector<uint8_t> data;
+        std::atomic<ChunkItem*> next{nullptr};
+    };
+    
+    class LockFreeQueue {
+    private:
+        std::atomic<ChunkItem*> head{nullptr};
+        std::atomic<ChunkItem*> tail{nullptr};
+        
+    public:
+        LockFreeQueue() {
+            auto dummy = new ChunkItem{0, {}, nullptr};
+            head.store(dummy);
+            tail.store(dummy);
+        }
+        
+        ~LockFreeQueue() {
+            while (ChunkItem* item = pop()) {
+                delete item;
+            }
+            delete head.load();
+        }
+        
+        void push(ChunkItem* item) {
+            item->next.store(nullptr);
+            ChunkItem* prevTail = tail.exchange(item);
+            prevTail->next.store(item);
+        }
+        
+        ChunkItem* pop() {
+            ChunkItem* head_node = head.load();
+            ChunkItem* next = head_node->next.load();
+            
+            if (next == nullptr) {
+                return nullptr; // Queue is empty
+            }
+            
+            // Copy the data before deleting the node
+            ChunkItem* result = new ChunkItem{next->index, next->data, nullptr};
+            
+            // Move head forward
+            head.store(next);
+            delete head_node;
+            return result;
+        }
+        
+        bool empty() {
+            ChunkItem* head_node = head.load();
+            ChunkItem* next = head_node->next.load();
+            return next == nullptr;
+        }
+    };
+    
+    LockFreeQueue m_ChunkQueue;
+    std::ofstream m_OutputFile;
+    std::atomic<bool> m_HasNewChunks{false};
+    
+    void StartClientThreads(const i2p::data::IdentHash& serverHash) {
+        m_StopThreads = false;
+        m_FileTransferComplete = false;
+        
+        // Start chunk processor thread
+        m_ChunkProcessorThread = std::thread([this]() {
+            std::cout << "Chunk processor thread started\n";
+            ProcessChunks();
+        });
+        
+        // Start gap detector thread
+        m_GapDetectorThread = std::thread([this, serverHash]() {
+            DetectGapsAndRequest(serverHash);
+        });
+    }
+    
+    void ProcessChunks() {
+        while (!m_StopThreads) {
+            ChunkItem* item = m_ChunkQueue.pop();
+            
+            if (item != nullptr) {
+                // Write chunk at correct position
+                size_t offset = item->index * m_ChunkSize;
+                
+                m_OutputFile.seekp(offset);
+                if (!m_OutputFile.good()) {
+                    std::cout << "Error: Failed to seek to offset " << offset << " for chunk " << item->index << "\n";
+                }
+                
+                m_OutputFile.write(reinterpret_cast<const char*>(item->data.data()), item->data.size());
+                if (!m_OutputFile.good()) {
+                    std::cout << "Error: Failed to write chunk " << item->index << " at offset " << offset << "\n";
+                }
+                
+                m_OutputFile.flush();
+                
+                delete item; // Clean up
+                m_HasNewChunks = false;
+            } else {
+                // No items available, wait a bit
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        }
+    }
+    
+    void DetectGapsAndRequest(const i2p::data::IdentHash& serverHash) {
+        std::cout << "Gap detection thread started\n";
+        
+        size_t lastChunkCount = 0;
+        
+        while (!m_StopThreads && !m_FileTransferComplete) {
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+            
+            size_t currentChunkCount = m_ReceivedChunks.size();
+            
+            // Always print status when near completion
+            if (currentChunkCount >= (m_TotalExpectedChunks * 0.95)) {
+                std::cout << "Gap detection: " << currentChunkCount 
+                          << "/" << m_TotalExpectedChunks << " chunks received\n";
+            }
+            
+            // Check if we have received all chunks
+            if (currentChunkCount >= m_TotalExpectedChunks && !m_VerificationStarted.exchange(true)) {
+                std::cout << "All chunks received, starting verification\n";
+                m_FileTransferComplete = true;
+                VerifyAndComplete(serverHash);
+                break;
+            }
+            
+            // Detect stall: no new chunks received
+            if (currentChunkCount == lastChunkCount) {
+                std::cout << "Stall detected: no new chunks since last check.\nRequesting missing chunks\n";
+                RequestMissingChunks(serverHash);
+            }
+            lastChunkCount = currentChunkCount;
+        }
+    }
+    
+    void RequestMissingChunks(const i2p::data::IdentHash& serverHash) {
+        std::vector<uint32_t> missingChunks;
+        
+        for (uint32_t i = 0; i < m_TotalExpectedChunks; ++i) {
+            if (m_ReceivedChunks.find(i) == m_ReceivedChunks.end()) {
+                missingChunks.push_back(i);
+            }
+        }
+        
+        if (!missingChunks.empty()) {
+            std::cout << "Client: Requesting " << missingChunks.size() << " missing chunks (received " 
+                      << m_ReceivedChunks.size() << "/" << m_TotalExpectedChunks << ")\n";
+            
+            // Print first few missing chunks for debugging
+            for (size_t i = 0; i < std::min(size_t(5), missingChunks.size()); ++i) {
+                std::cout << "  Missing chunk: " << missingChunks[i] << "\n";
+            }
+            
+            // Create request payload with chunk indices
+            std::string requestPayload;
+            for (uint32_t chunkIndex : missingChunks) {
+                requestPayload.append(reinterpret_cast<const char*>(&chunkIndex), sizeof(chunkIndex));
+            }
+            
+            auto request = CreateEchoMessage(TunnelEcho::CHUNK_REQUEST, requestPayload);
+            SendMessage(serverHash, request);
+            ++m_MessagesSent;
+            std::cout << "Sent CHUNK_REQUEST #" << m_SequenceId 
+                      << " to " << serverHash.ToBase32().substr(0, 8) << "... "
+                      << "(requesting " << missingChunks.size() << " chunks)\n";
+        }
+    }
+    
+    void VerifyAndComplete(const i2p::data::IdentHash& serverHash) {
+        std::cout << "Client: All chunks received, verifying file...\n";
+        
+        // Ensure file is closed and flushed
+        if (m_OutputFile.is_open()) {
+            m_OutputFile.flush();
+            m_OutputFile.close();
+        }
+        
+        // Give file system a moment to finalize writes
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        
+        // Check file exists and get size
+        std::ifstream file(g_receivedFileName, std::ios::binary);
+        if (!file.is_open()) {
+            std::cout << "ERROR: Cannot open received file!\n";
+            m_ShouldExit = true;
+            return;
+        }
+        
+        file.seekg(0, std::ios::end);
+        size_t actualFileSize = file.tellg();
+        file.seekg(0, std::ios::beg);
+        
+        std::cout << "Expected file size: " << m_ExpectedFileSize
+                  << ", Actual file size: " << actualFileSize << "\n";
+        
+        if (actualFileSize != m_ExpectedFileSize) {
+            std::cout << "ERROR: File size mismatch!\n";
+        }
+
+        std::cout << "Calculating CRC32...\n";
+        uint32_t receivedCRC = TunnelEcho::calculateCRC32Stream(g_receivedFileName);
+        std::stringstream ss;
+        ss << std::hex << receivedCRC;
+        std::string receivedChecksum = ss.str();
+        
+        std::cout << "  Expected: " << m_ExpectedChecksum << "\n";
+        std::cout << "  Received: " << receivedChecksum << "\n";
+        
+        std::string response;
+        if (receivedChecksum == m_ExpectedChecksum) {
+            std::cout << "Client: Checksum verification PASSED\n";
+            response = "checksum_ok";
+        } else {
+            std::cout << "Client: Checksum verification FAILED\n";
+            response = "checksum_failed";
+        }
+        
+        // Send completion notification
+        auto ok = CreateEchoMessage(TunnelEcho::FILE_TRANSFER_OK, response);
+        SendMessage(serverHash, ok);
+        ++m_MessagesSent;
+        std::cout << "Client: Transfer complete, shutting down\n";
+        m_ShouldExit = true;
+    }
+
     void CreateSSU2TunnelPool() {
         // Create custom tunnel pool with SSU2 preference
         auto tunnelPool = std::make_shared<SSU2PreferringTunnelPool>(
@@ -392,11 +777,33 @@ private:
                     if (parts.size() >= 4) {
                         m_ExpectedFileSize = std::stoull(parts[2]);
                         m_ExpectedChecksum = parts[3];
+                        m_TotalExpectedChunks = (m_ExpectedFileSize + m_ChunkSize - 1) / m_ChunkSize;
+                        
+                        // Clear previous data structures
                         m_ReceivedData.clear();
-                        m_ReceivedData.reserve(m_ExpectedFileSize);
+                        m_ReceivedChunks.clear();
+                        m_ChunkData.clear();
+                        m_FileTransferComplete = false;
+                        m_VerificationStarted = false;
+                        
+                        // Open output file for writing chunks at specific positions
+                        m_OutputFile.open(g_receivedFileName, std::ios::binary | std::ios::trunc);
+                        
+                        // Pre-allocate the file to the correct size using vector
+                        std::vector<char> buffer(m_ExpectedFileSize, 0xFF);  // Fill with 0xFF instead of 0x00
+                        m_OutputFile.write(buffer.data(), m_ExpectedFileSize);
+                        m_OutputFile.seekp(0);
+                        m_OutputFile.flush();
+                        
                         std::cout << "Client: Expecting file " << parts[1] 
-                                  << " (" << parts[2] << " bytes, checksum: " 
-                                  << m_ExpectedChecksum << ")\n";
+                                  << " (" << parts[2] << " bytes, " << m_TotalExpectedChunks 
+                                  << " chunks, checksum: " << m_ExpectedChecksum << ")\n";
+                        std::cout << "File size = " << m_ExpectedFileSize
+                                  << ", Chunk size = " << m_ChunkSize 
+                                  << ", Total chunks = " << m_TotalExpectedChunks << "\n";
+                        
+                        // Start processing threads
+                        StartClientThreads(from);
                     }
                 }
                 break;
@@ -405,41 +812,45 @@ private:
                 ++m_MessagesReceived;
                           
                 if (!m_IsServer) {
-                    m_ReceivedData.insert(m_ReceivedData.end(), payload.begin(), payload.end());
+                    // Parse chunk header: chunkIndex(4) + chunkSize(4) + payload
+                    if (payload.size() < 8) break; // Invalid chunk
                     
-                                if (m_MessagesReceived % 1000 == 0) {
-                        std::cout << "Client: Accumulated " << m_ReceivedData.size() 
-                                  << "/" << m_ExpectedFileSize << " bytes (" << m_MessagesReceived << " chunks)\n";
+                    uint32_t chunkIndex = *reinterpret_cast<const uint32_t*>(payload.data());
+                    uint32_t chunkSize = *reinterpret_cast<const uint32_t*>(payload.data() + 4);
+                    
+                    if (payload.size() < 8 + chunkSize) break; // Invalid chunk size
+                    
+                    std::vector<uint8_t> chunkData(payload.begin() + 8, payload.begin() + 8 + chunkSize);
+                    
+                    // Store chunk for processing thread using lock-free queue
+                    ChunkItem* item = new ChunkItem{chunkIndex, std::move(chunkData), nullptr};
+                    m_ChunkQueue.push(item);
+                    m_ReceivedChunks.insert(chunkIndex);
+                    m_HasNewChunks = true;
+                    
+                    if (m_MessagesReceived % 1000 == 0) {
+                        std::cout << "Client: Accumulated " << m_ReceivedChunks.size() 
+                                  << "/" << m_TotalExpectedChunks << " chunks (" << m_MessagesReceived << " messages)\n";
                     }
-                    
-                    if (m_ReceivedData.size() >= m_ExpectedFileSize) {
-                        std::cout << "Client: File transfer complete, verifying checksum...\n";
-                        
-                        uint32_t receivedCRC = TunnelEcho::calculateCRC32(m_ReceivedData);
-                        std::stringstream ss;
-                        ss << std::hex << receivedCRC;
-                        std::string receivedChecksum = ss.str();
-                        
-                        std::cout << "  Expected: " << m_ExpectedChecksum << "\n";
-                        std::cout << "  Received: " << receivedChecksum << "\n";
-                        
-                        std::string response;
-                        if (receivedChecksum == m_ExpectedChecksum) {
-                            std::cout << "Client: Checksum verification PASSED\n";
-                            response = "checksum_ok";
-                        } else {
-                            std::cout << "Client: Checksum verification FAILED\n";
-                            response = "checksum_failed";
+                }
+                break;
+                
+            case TunnelEcho::CHUNK_REQUEST:
+                ++m_MessagesReceived;
+                std::cout << "Received CHUNK_REQUEST #" << msg->sequenceId 
+                          << " from " << from.ToBase32().substr(0, 8) << "... "
+                          << "(RTT: " << rtt << "ms)\n";
+                if (m_IsServer) {
+                    // Parse requested chunk indices
+                    std::vector<uint32_t> requestedChunks;
+                    for (size_t i = 0; i < payload.size(); i += 4) {
+                        if (i + 4 <= payload.size()) {
+                            uint32_t chunkIndex = *reinterpret_cast<const uint32_t*>(payload.data() + i);
+                            requestedChunks.push_back(chunkIndex);
                         }
-                        
-                        std::cout << "Client: Sending FILE_TRANSFER_OK\n";
-                        auto ok = CreateEchoMessage(TunnelEcho::FILE_TRANSFER_OK, response);
-                        SendMessage(from, ok);
-                        ++m_MessagesSent;
-                        std::cout << "Sent FILE_TRANSFER_OK #" << m_SequenceId << "\n";
-                        std::cout << "Client: Transfer complete, shutting down\n";
-                        m_ShouldExit = true;
                     }
+                    std::cout << "Server: Retransmitting " << requestedChunks.size() << " requested chunks\n";
+                    SendRequestedChunks(from, requestedChunks);
                 }
                 break;
                 
@@ -484,12 +895,13 @@ private:
 void printUsage(const char* program) {
     std::cout << "Usage: " << program << " <mode> [options]\n\n";
     std::cout << "Modes:\n";
-    std::cout << "  server [--conf config.conf] [--datadir path] [--hops N]\n";
+    std::cout << "  server [--conf config.conf] [--datadir path] [--hops N] [--filesize small|medium|large]\n";
     std::cout << "  client [--conf config.conf] [--datadir path] --server-b32 <address> [--hops N] [--message <text>] [--count N]\n\n";
     std::cout << "Server Options:\n";
     std::cout << "  --conf <file>       Configuration file path\n";
     std::cout << "  --datadir <path>    Data directory path\n";
-    std::cout << "  --hops <N>          Tunnel hop count (default: 1, 0 = direct connection)\n\n";
+    std::cout << "  --hops <N>          Tunnel hop count (default: 1, 0 = direct connection)\n";
+    std::cout << "  --filesize <size>   Test file size: small (10MB), medium (100MB), large (1GB) [default: medium]\n\n";
     std::cout << "Client Options:\n";
     std::cout << "  --conf <file>       Configuration file path\n";
     std::cout << "  --datadir <path>    Data directory path\n";
@@ -506,9 +918,7 @@ void printUsage(const char* program) {
     std::cout << "  " << program << " client --conf cli.conf --datadir /tmp/cli --hops 2 --server-b32 <server_address>\n\n";
 }
 
-int runServer(const std::string& datadir, const std::string& config, int hops) {
-    // Default test file path
-    std::string testFile = "/tmp/testfile.txt";
+int runServer(const std::string& datadir, const std::string& config, int hops, TunnelEcho::FileSize fileSize = TunnelEcho::MEDIUM) {
     try {
         std::cout << "Initializing server node...\n";
         i2p::embed::I2PdUtils::initNode("server", datadir, config);
@@ -525,8 +935,8 @@ int runServer(const std::string& datadir, const std::string& config, int hops) {
         
         auto echoServer = std::make_shared<TunnelEchoManager>(serverDest, true, hops);
         
-        // Load test file
-        std::cout << "Loading test file: " << testFile << "\n";
+        // Generate test file
+        std::string testFile = TunnelEcho::generateTestFile(fileSize);
         echoServer->LoadFile(testFile);
         
         echoServer->Start();
@@ -546,6 +956,11 @@ int runServer(const std::string& datadir, const std::string& config, int hops) {
             std::cout << "Server running... (messages received: " 
                       << echoServer->GetMessagesReceived() << ")\n";
         }
+        
+        // Clean up test file
+        std::remove(testFile.c_str());
+        std::cout << "Test file cleaned up\n";
+        
         // Force clean exit to avoid any remaining mutex issues
         std::cout << "Exiting cleanly...\n";
         std::_Exit(0);  // Use _Exit to avoid atexit handlers that might cause issues
@@ -613,35 +1028,28 @@ int runClient(const std::string& datadir, const std::string& config,
         // Send FILE_TRANSFER_START message
         std::cout << "Sending FILE_TRANSFER_START...\n";
         echoClient->SendTunnelWarmUp(serverIdent);
-        std::this_thread::sleep_for(2s);
+        std::this_thread::sleep_for(200ms);
         
         // Send FILE_TRANSFER_REQUEST message
         std::cout << "Sending FILE_TRANSFER_REQUEST...\n";
         echoClient->SendFileTransferRequest(serverIdent, "testfile.bin");
-        std::this_thread::sleep_for(2s);
+        std::this_thread::sleep_for(200ms);
         
         // Wait for responses and file transfer completion
         std::cout << "Waiting for file transfer to complete...\n";
         
         // Wait for completion or timeout
         auto timeout = std::chrono::steady_clock::now() + std::chrono::seconds(3600);  // 1 hour timeout
-        int lastMessageCount = 0;
-        auto lastProgressTime = std::chrono::steady_clock::now();
-        
+
+        while (!echoClient->IsTransferCompleted() && std::chrono::steady_clock::now() < timeout) {
+            std::this_thread::sleep_for(200ms);
+        }
+
+        auto transferTimeTime = std::chrono::high_resolution_clock::now();
+        auto transferDuration = std::chrono::duration<double>(transferTimeTime - startTime);
+
         while (!echoClient->ShouldExit() && std::chrono::steady_clock::now() < timeout) {
-            std::this_thread::sleep_for(2s);  // Check every 2 seconds
-            
-            int currentMessages = echoClient->GetMessagesReceived();
-            auto currentTime = std::chrono::steady_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(currentTime - lastProgressTime).count();
-            
-            if (elapsed >= 5) {  // Report progress every 5 seconds
-                double messagesPerSec = (currentMessages - lastMessageCount) / double(elapsed);
-                std::cout << "Progress: " << currentMessages << " chunks received "
-                          << "(" << std::fixed << std::setprecision(1) << messagesPerSec << " chunks/sec)\n";
-                lastMessageCount = currentMessages;
-                lastProgressTime = currentTime;
-            }
+            std::this_thread::sleep_for(200ms);
         }
         
         if (echoClient->ShouldExit()) {
@@ -651,15 +1059,22 @@ int runClient(const std::string& datadir, const std::string& config,
         }
         
         auto endTime = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
+        auto duration = std::chrono::duration<double>(endTime - startTime);
+        auto fileSizeMb = echoClient->GetFileSize() / (1024 * 1024);
         
         std::cout << "\n=== TUNNEL ECHO TEST COMPLETED ===\n";
-        std::cout << "Test duration: " << duration.count() << "ms\n";
+        std::cout << "Test duration: " << std::setprecision(3) << duration.count() << " s\n";
+        std::cout << "Transfer duration: " << std::setprecision(3) << transferDuration.count() << " s\n";
+        std::cout << "Size: " <<  echoClient->GetFileSize() << " bytes\n";
+        std::cout << "Approx. speed: " << std::setprecision(2) << fileSizeMb/transferDuration.count() << " MB/s\n";
         std::cout << "Messages sent: " << echoClient->GetMessagesSent() << "\n";
         std::cout << "Messages received: " << echoClient->GetMessagesReceived() << "\n";
         
         // Comprehensive cleanup to avoid mutex issues
         std::cout << "Cleaning up client resources...\n";
+        
+        // Stop client threads if they're running
+        echoClient->StopClientThreads();
         
         try {
             // Stop application layer first
@@ -715,6 +1130,9 @@ int main(int argc, char* argv[]) {
         std::string serverB32 = "";
         std::string message = "Hello from tunnel echo test";
         
+        // Server-specific arguments
+        TunnelEcho::FileSize fileSize = TunnelEcho::MEDIUM;
+        
         for (int i = 2; i < argc; i++) {
             std::string arg = argv[i];
             
@@ -728,6 +1146,18 @@ int main(int argc, char* argv[]) {
                 serverB32 = argv[++i];
             } else if (arg == "--message" && i + 1 < argc) {
                 message = argv[++i];
+            } else if (arg == "--filesize" && i + 1 < argc) {
+                std::string size = argv[++i];
+                if (size == "small") {
+                    fileSize = TunnelEcho::SMALL;
+                } else if (size == "medium") {
+                    fileSize = TunnelEcho::MEDIUM;
+                } else if (size == "large") {
+                    fileSize = TunnelEcho::LARGE;
+                } else {
+                    std::cerr << "ERROR: Invalid filesize. Use: small, medium, or large\n";
+                    return 1;
+                }
             } else {
                 std::cerr << "Unknown argument: " << arg << "\n";
                 printUsage(argv[0]);
@@ -736,7 +1166,7 @@ int main(int argc, char* argv[]) {
         }
         
         if (mode == "server")
-            return runServer(datadir, config, hops);
+            return runServer(datadir, config, hops, fileSize);
 
         if (mode == "client")
         {

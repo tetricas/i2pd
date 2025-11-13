@@ -90,16 +90,16 @@ target_link_libraries(chunked_file_test
         Threads::Threads
 )
 
-add_executable(tunnel_echo_test app/tunnel_echo_test.cpp ${CORE_SOURCES} ${APP_SOURCES})
-target_include_directories(tunnel_echo_test PRIVATE
+add_executable(tunnel_ftp_demo app/tunnel_ftp_demo.cpp ${CORE_SOURCES} ${APP_SOURCES})
+target_include_directories(tunnel_ftp_demo PRIVATE
         ${CMAKE_SOURCE_DIR}/libi2pd_client
         ${CMAKE_SOURCE_DIR}/libi2pd
 )
 
-target_link_libraries(tunnel_echo_test
-        ${CMAKE_SOURCE_DIR}/../libi2pdclient.a
-        ${CMAKE_SOURCE_DIR}/../libi2pd.a
-        ${CMAKE_SOURCE_DIR}/../libi2pdlang.a
+target_link_libraries(tunnel_ftp_demo
+        libi2pdclient
+        libi2pd
+        libi2pdlang
         Boost::system Boost::filesystem Boost::program_options
         OpenSSL::SSL OpenSSL::Crypto
         ZLIB::ZLIB
