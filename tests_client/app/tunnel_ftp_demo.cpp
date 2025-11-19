@@ -38,9 +38,10 @@ namespace TunnelEcho {
         TUNNEL_WARM_UP = 1,
         FILE_TRANSFER_REQUEST = 2,
         FILE_METADATA = 3,
-        FILE_CHUNK = 4,
-        FILE_TRANSFER_OK = 5,
-        CHUNK_REQUEST = 6
+        FILE_METADATA_ACK = 4,
+        FILE_CHUNK = 5,
+        FILE_TRANSFER_OK = 6,
+        CHUNK_REQUEST = 7
     };
     
     struct EchoMessage {
@@ -237,6 +238,14 @@ public:
     {
         std::cout << "Stopping tunnel echo manager...\n";
         
+        // Stop server sender thread if running
+        if (m_IsServer) {
+            m_StopSender = true;
+            if (m_FileSenderThread.joinable()) {
+                m_FileSenderThread.join();
+            }
+        }
+        
         // Reset receiver
         auto datagramDestination = m_Owner->CreateDatagramDestination(false, i2p::datagram::eDatagramV1);
         datagramDestination->ResetReceiver(TunnelEcho::ECHO_PORT);
@@ -301,7 +310,7 @@ public:
         
         uint32_t chunkIndex = 0;
         
-        while (m_BytesSent < m_FileInfo.size) {
+        while (m_BytesSent < m_FileInfo.size && !m_StopSender) {
             
             size_t remainingBytes = m_FileInfo.size - m_BytesSent;
             size_t chunkSize = std::min(remainingBytes, m_ChunkSize);
@@ -331,11 +340,18 @@ public:
                           << " (" << bytesRead << " bytes, " << m_BytesSent 
                           << "/" << m_FileInfo.size << ")\n";
             }
+            
+            // Yield every 500 chunks to allow message processing
+            if (chunkIndex % 10 == 0) {
+                std::this_thread::sleep_for(std::chrono::microseconds(50));
+            }
         }
         
         file.close();
-        std::cout << "File transfer complete! Sent " << m_BytesSent 
-                  << " bytes in " << chunkIndex << " chunks\n";
+        if (!m_StopSender) {
+            std::cout << "File transfer complete! Sent " << m_BytesSent 
+                      << " bytes in " << chunkIndex << " chunks\n";
+        }
     }
     
     void SendRequestedChunks(const i2p::data::IdentHash& to, const std::vector<uint32_t>& requestedChunks) {
@@ -423,9 +439,11 @@ private:
     std::chrono::steady_clock::time_point m_LastProgressTime;
     
     // Server-side chunking state  
-    size_t m_ChunkSize{31744};  // 31KB chunks
+    size_t m_ChunkSize{15360};  // 15KB chunks (fits within I2P 16KB transport limit)
     size_t m_BytesSent{0};
     i2p::data::IdentHash m_CurrentClient;
+    std::thread m_FileSenderThread;
+    std::atomic<bool> m_StopSender{false};
     
     // Client-side processing
     std::atomic<bool> m_FileTransferComplete{false};
@@ -542,7 +560,16 @@ private:
     void DetectGapsAndRequest(const i2p::data::IdentHash& serverHash) {
         std::cout << "Gap detection thread started\n";
         
-        size_t lastChunkCount = 0;
+        // Wait for first chunk to arrive before starting gap detection
+        std::cout << "Gap detection: waiting for first chunk to arrive...\n";
+        while (!m_StopThreads && m_ReceivedChunks.empty()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        
+        if (m_StopThreads) return;
+        std::cout << "Gap detection: first chunk received, starting stall monitoring\n";
+        
+        size_t lastChunkCount = m_ReceivedChunks.size();
         
         while (!m_StopThreads && !m_FileTransferComplete) {
             std::this_thread::sleep_for(std::chrono::seconds(3));
@@ -755,8 +782,7 @@ private:
                     std::cout << "Sent FILE_METADATA response #" << m_SequenceId 
                               << " (file: " << m_FileInfo.filename << ", " << m_FileInfo.size << " bytes)\n";
                     
-                    std::cout << "Server: Starting chunked transfer (" << m_ChunkSize << " byte chunks)\n";
-                    SendAllChunks(from);
+                    std::cout << "Server: Waiting for client ACK before starting transfer\n";
                 }
                 break;
                 
@@ -804,7 +830,28 @@ private:
                         
                         // Start processing threads
                         StartClientThreads(from);
+                        
+                        // Send ACK to server to start chunk sending
+                        auto ack = CreateEchoMessage(TunnelEcho::FILE_METADATA_ACK, "ready");
+                        SendMessage(from, ack);
+                        ++m_MessagesSent;
+                        std::cout << "Client: Sent FILE_METADATA_ACK, ready to receive chunks\n";
                     }
+                }
+                break;
+                
+            case TunnelEcho::FILE_METADATA_ACK:
+                ++m_MessagesReceived;
+                std::cout << "Received FILE_METADATA_ACK from " << from.ToBase32().substr(0, 8) << "... "
+                          << "(RTT: " << rtt << "ms, data: " << payload << ")\n";
+                if (m_IsServer && payload == "ready") {
+                    std::cout << "Server: Client ready, starting chunked transfer (" << m_ChunkSize << " byte chunks)\n";
+                    
+                    // Start file sending in separate thread
+                    m_StopSender = false;
+                    m_FileSenderThread = std::thread([this, from]() {
+                        SendAllChunks(from);
+                    });
                 }
                 break;
                 
@@ -860,6 +907,13 @@ private:
                           << "(data: " << payload << ")\n";
                 if (m_IsServer) {
                     std::cout << "Server: Transfer complete, shutting down\n";
+                    
+                    // Stop the file sender thread
+                    m_StopSender = true;
+                    if (m_FileSenderThread.joinable()) {
+                        m_FileSenderThread.join();
+                    }
+                    
                     m_ShouldExit = true;
                 }
                 break;
