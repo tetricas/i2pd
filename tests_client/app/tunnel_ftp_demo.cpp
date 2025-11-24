@@ -439,7 +439,7 @@ private:
     std::chrono::steady_clock::time_point m_LastProgressTime;
     
     // Server-side chunking state  
-    size_t m_ChunkSize{15360};  // 15KB chunks (fits within I2P 16KB transport limit)
+    size_t m_ChunkSize{31744};  // 31KB chunks (fewer total packets)
     size_t m_BytesSent{0};
     i2p::data::IdentHash m_CurrentClient;
     std::thread m_FileSenderThread;
@@ -691,14 +691,15 @@ private:
 
     void CreateSSU2TunnelPool() {
         // Create custom tunnel pool with SSU2 preference
+        // Configured for high-bandwidth file transfers (9-10 MB/s)
         auto tunnelPool = std::make_shared<SSU2PreferringTunnelPool>(
             m_Hops,    // inbound hops
-            m_Hops,    // outbound hops  
-            2,         // inbound tunnels
-            2,         // outbound tunnels
+            m_Hops,    // outbound hops
+            10,        // inbound tunnels (increased from 2 for high bandwidth)
+            10,        // outbound tunnels (increased from 2 for high bandwidth)
             0,         // inbound variance
             0,         // outbound variance
-            false      // high bandwidth
+            true       // high bandwidth (enabled for 9-10 MB/s transfers)
         );
         
         tunnelPool->SetLocalDestination(m_Owner);
