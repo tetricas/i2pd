@@ -535,17 +535,22 @@ private:
             if (item != nullptr) {
                 // Write chunk at correct position
                 size_t offset = item->index * m_ChunkSize;
-                
+
+                // Clear any previous error state
+                m_OutputFile.clear();
+
                 m_OutputFile.seekp(offset);
                 if (!m_OutputFile.good()) {
                     std::cout << "Error: Failed to seek to offset " << offset << " for chunk " << item->index << "\n";
+                    m_OutputFile.clear();  // Clear error and continue
                 }
-                
+
                 m_OutputFile.write(reinterpret_cast<const char*>(item->data.data()), item->data.size());
                 if (!m_OutputFile.good()) {
                     std::cout << "Error: Failed to write chunk " << item->index << " at offset " << offset << "\n";
+                    m_OutputFile.clear();  // Clear error and continue
                 }
-                
+
                 m_OutputFile.flush();
                 
                 delete item; // Clean up
@@ -815,10 +820,10 @@ private:
                         
                         // Open output file for writing chunks at specific positions
                         m_OutputFile.open(g_receivedFileName, std::ios::binary | std::ios::trunc);
-                        
-                        // Pre-allocate the file to the correct size using vector
-                        std::vector<char> buffer(m_ExpectedFileSize, 0xFF);  // Fill with 0xFF instead of 0x00
-                        m_OutputFile.write(buffer.data(), m_ExpectedFileSize);
+
+                        // Pre-allocate file using sparse file method (efficient for large files)
+                        m_OutputFile.seekp(m_ExpectedFileSize - 1);
+                        m_OutputFile.put('\0');  // Write single byte at end to set file size
                         m_OutputFile.seekp(0);
                         m_OutputFile.flush();
                         
