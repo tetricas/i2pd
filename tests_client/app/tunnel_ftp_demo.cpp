@@ -298,59 +298,93 @@ public:
         if (!m_HasFile) {
             return;
         }
-        
+
         // Send all chunks with proper chunk indexing based on file position
         std::ifstream file(m_FileInfo.filepath, std::ios::binary);
         if (!file.is_open()) {
             std::cerr << "Cannot open file for reading: " << m_FileInfo.filepath << "\n";
             return;
         }
-        
+
         std::vector<uint8_t> buffer(m_ChunkSize);
-        
         uint32_t chunkIndex = 0;
-        
+
+        // Rate limiting: 8 MB/s maximum
+        const size_t MAX_BYTES_PER_SECOND = 8 * 1024 * 1024;  // 8 MB/s
+        auto transferStartTime = std::chrono::steady_clock::now();
+        size_t bytesSentAtStart = m_BytesSent;
+
+        std::cout << "Server: Starting rate-limited transfer (max 8 MB/s)\n";
+
         while (m_BytesSent < m_FileInfo.size && !m_StopSender) {
-            
+
             size_t remainingBytes = m_FileInfo.size - m_BytesSent;
             size_t chunkSize = std::min(remainingBytes, m_ChunkSize);
-            
+
             file.read(reinterpret_cast<char*>(buffer.data()), chunkSize);
             size_t bytesRead = file.gcount();
-            
+
             if (bytesRead == 0) break;
-            
+
             // Create chunk with header: chunkIndex(4) + chunkSize(4) + payload
             std::string chunkData;
             uint32_t bytesRead32 = static_cast<uint32_t>(bytesRead);
             chunkData.append(reinterpret_cast<const char*>(&chunkIndex), sizeof(chunkIndex));
             chunkData.append(reinterpret_cast<const char*>(&bytesRead32), sizeof(bytesRead32));
             chunkData.append(reinterpret_cast<const char*>(buffer.data()), bytesRead);
-            
-            
+
             auto chunk = CreateEchoMessage(TunnelEcho::FILE_CHUNK, chunkData);
             SendMessage(to, chunk);
             ++m_MessagesSent;
-            
+
             m_BytesSent += bytesRead;
             chunkIndex++;
-            
-            if (chunkIndex % 1000 == 0) {
-                std::cout << "Sent chunk " << chunkIndex 
-                          << " (" << bytesRead << " bytes, " << m_BytesSent 
-                          << "/" << m_FileInfo.size << ")\n";
+
+            // Rate limiting check every chunk
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - transferStartTime);
+            size_t bytesTransferred = m_BytesSent - bytesSentAtStart;
+
+            if (elapsed.count() > 0) {
+                size_t currentRate = (bytesTransferred * 1000) / elapsed.count();  // bytes per second
+
+                if (currentRate > MAX_BYTES_PER_SECOND) {
+                    // Calculate how long we should have taken
+                    size_t expectedTimeMs = (bytesTransferred * 1000) / MAX_BYTES_PER_SECOND;
+                    int64_t sleepTimeMs = expectedTimeMs - elapsed.count();
+
+                    if (sleepTimeMs > 0) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(sleepTimeMs));
+                    }
+                }
             }
-            
-            // Yield every 500 chunks to allow message processing
-            if (chunkIndex % 10 == 0) {
-                std::this_thread::sleep_for(std::chrono::microseconds(50));
+
+            if (chunkIndex % 1000 == 0) {
+                auto now = std::chrono::steady_clock::now();
+                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - transferStartTime);
+                size_t bytesTransferred = m_BytesSent - bytesSentAtStart;
+                double currentRateMBps = 0.0;
+                if (elapsed.count() > 0) {
+                    currentRateMBps = (bytesTransferred / 1024.0 / 1024.0) / (elapsed.count() / 1000.0);
+                }
+                std::cout << "Sent chunk " << chunkIndex
+                          << " (" << bytesRead << " bytes, " << m_BytesSent
+                          << "/" << m_FileInfo.size << ", rate: "
+                          << std::fixed << std::setprecision(2) << currentRateMBps << " MB/s)\n";
             }
         }
-        
+
         file.close();
         if (!m_StopSender) {
-            std::cout << "File transfer complete! Sent " << m_BytesSent 
-                      << " bytes in " << chunkIndex << " chunks\n";
+            auto totalElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - transferStartTime);
+            double avgRateMBps = 0.0;
+            if (totalElapsed.count() > 0) {
+                avgRateMBps = ((m_BytesSent - bytesSentAtStart) / 1024.0 / 1024.0) / (totalElapsed.count() / 1000.0);
+            }
+            std::cout << "File transfer complete! Sent " << m_BytesSent
+                      << " bytes in " << chunkIndex << " chunks"
+                      << " (avg rate: " << std::fixed << std::setprecision(2) << avgRateMBps << " MB/s)\n";
         }
     }
     
