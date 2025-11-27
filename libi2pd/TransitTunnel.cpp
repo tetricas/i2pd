@@ -64,12 +64,25 @@ namespace tunnel
 
 	void TransitTunnelParticipant::HandleTunnelDataMsg (std::shared_ptr<i2p::I2NPMessage>&& tunnelMsg)
 	{
+		const size_t MAX_TRANSIT_TUNNEL_QUEUE_SIZE = 200;  // Limit per-tunnel queue to prevent memory leak
+
+		if (m_TunnelDataMsgs.size() >= MAX_TRANSIT_TUNNEL_QUEUE_SIZE) {
+			LogPrint(eLogWarning, "TransitTunnel: Queue full (", m_TunnelDataMsgs.size(),
+			         "), dropping message for tunnel ", GetTunnelID());
+			return;
+		}
+
 		EncryptTunnelMsg (tunnelMsg, tunnelMsg);
 
 		m_NumTransmittedBytes += tunnelMsg->GetLength ();
 		htobe32buf (tunnelMsg->GetPayload (), GetNextTunnelID ());
 		tunnelMsg->FillI2NPMessageHeader (eI2NPTunnelData);
 		m_TunnelDataMsgs.push_back (tunnelMsg);
+
+		// Auto-flush if queue getting large to prevent accumulation
+		if (m_TunnelDataMsgs.size() >= 50) {
+			FlushTunnelDataMsgs();
+		}
 	}
 
 	void TransitTunnelParticipant::FlushTunnelDataMsgs ()

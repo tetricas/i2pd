@@ -963,7 +963,18 @@ namespace tunnel
 
 	void Tunnels::PostTunnelData (std::shared_ptr<I2NPMessage> msg)
 	{
-		if (msg) m_Queue.Put (msg);
+		const size_t MAX_TUNNEL_QUEUE_SIZE = 10000;  // Limit main queue to prevent unbounded growth
+
+		if (msg)
+		{
+			if (m_Queue.GetSize() >= MAX_TUNNEL_QUEUE_SIZE) {
+				LogPrint(eLogWarning, "Tunnel: Main queue full (", m_Queue.GetSize(),
+				         "/", MAX_TUNNEL_QUEUE_SIZE, "), dropping message");
+				if (msg->onDrop) msg->onDrop();
+				return;
+			}
+			m_Queue.Put (msg);
+		}
 	}
 
 	void Tunnels::PostTunnelData (std::list<std::shared_ptr<I2NPMessage> >& msgs)

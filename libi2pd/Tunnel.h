@@ -42,11 +42,11 @@ namespace tunnel
 	const int MAX_NUM_RECORDS = 8;
 	const int UNKNOWN_LATENCY = -1;
 	const int HIGH_LATENCY_PER_HOP = 250000; // in microseconds
-	const int MAX_TUNNEL_MSGS_BATCH_SIZE = 100; // handle messages without interrupt
+	const int MAX_TUNNEL_MSGS_BATCH_SIZE = 50; // reduced from 100 to prevent accumulation
 	const uint16_t DEFAULT_MAX_NUM_TRANSIT_TUNNELS = 5000;
 	const int TUNNEL_MANAGE_INTERVAL = 15; // in seconds
 	const int TUNNEL_POOLS_MANAGE_INTERVAL = 5; // in seconds
-	const int TUNNEL_MEMORY_POOL_MANAGE_INTERVAL = 120; // in seconds
+	const int TUNNEL_MEMORY_POOL_MANAGE_INTERVAL = 30; // reduced from 120 to prevent memory bloat
 
 	const size_t I2NP_TUNNEL_MESSAGE_SIZE = TUNNEL_DATA_MSG_SIZE + I2NP_HEADER_SIZE + 34; // reserved for alignment and NTCP 16 + 6 + 12
 	const size_t I2NP_TUNNEL_ENPOINT_MESSAGE_SIZE = 2*TUNNEL_DATA_MSG_SIZE + I2NP_HEADER_SIZE + TUNNEL_GATEWAY_HEADER_SIZE + 28; // reserved for alignment and NTCP 16 + 6 + 6
