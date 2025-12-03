@@ -18,6 +18,11 @@
 
 namespace i2p
 {
+namespace http
+{
+	struct URL;
+}
+
 namespace data
 {
 
@@ -47,7 +52,12 @@ namespace data
 
 			bool FindZipDataDescriptor (std::istream& s);
 
-			std::string HttpsRequest (const std::string& address);
+			std::string HttpsRequest (const std::string& address, bool isHttps = true);
+			std::string ConnectAndReseed (http::URL& url, const http::URL& proxyUrl, bool isHttps);
+			template<typename Socket>
+			bool ConnectViaProxy (Socket& socket, boost::asio::io_context& service, const http::URL& url, const http::URL& proxyUrl, boost::system::error_code& ecode);
+			template<typename Socket>
+			bool ConnectDirect (Socket& socket, boost::asio::io_context& service, const http::URL& url, boost::system::error_code& ecode);
 			std::string YggdrasilRequest (const std::string& address);
 			template<typename Stream>
 			std::string ReseedRequest (Stream& s, const std::string& uri);

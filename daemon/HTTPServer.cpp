@@ -1174,6 +1174,38 @@ namespace http {
 
 		LogPrint(eLogDebug, "HTTPServer: Request: ", req.uri);
 
+		// Handle /router.info endpoint for reseed (must be before auth/host checks for public access)
+		if (req.uri.find("/router.info") != std::string::npos)
+		{
+			std::string dataDir = i2p::fs::GetDataDir();
+			std::string routerInfoPath = dataDir + i2p::fs::dirSep + "router.info";
+
+			std::ifstream file(routerInfoPath, std::ios::binary);
+			if (file)
+			{
+				file.seekg(0, std::ios::end);
+				size_t fileSize = file.tellg();
+				file.seekg(0, std::ios::beg);
+
+				std::vector<char> buffer(fileSize);
+				if (file.read(buffer.data(), fileSize))
+				{
+					res.code = 200;
+					res.add_header("Content-Type", "application/octet-stream");
+					res.add_header("Content-Length", std::to_string(fileSize));
+					content.assign(buffer.begin(), buffer.end());
+					SendReply(res, content);
+					LogPrint(eLogInfo, "HTTPServer: Served router.info to ", m_Socket->remote_endpoint());
+					return;
+				}
+			}
+
+			res.code = 404;
+			content = "router.info not found";
+			SendReply(res, content);
+			return;
+		}
+
 		if (needAuth && !CheckAuth(req)) {
 			res.code = 401;
 			res.add_header("WWW-Authenticate", "Basic realm=\"WebAdmin\"");
