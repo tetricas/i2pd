@@ -45,10 +45,10 @@ namespace i2p::data
 		if (!riFileName.empty()) // bootstrap from router.info file or URL
 		{
 			// Check if it's a HTTP URL
-			if (riFileName.length() > 7 && riFileName.substr(0, 7) == "http://")
+			if (riFileName.length() > 8 && riFileName.substr(0, 8) == "https://")
 			{
 				LogPrint (eLogInfo, "Reseed: Downloading router.info from ", riFileName);
-				std::string riData = HttpsRequest (riFileName, false); // false = HTTP, not HTTPS
+				std::string riData = HttpsRequest (riFileName);
 				if (!riData.empty())
 				{
 					// Save to temp file and process
@@ -580,30 +580,13 @@ namespace i2p::data
 		LogPrint (eLogInfo, "Reseed: ", numCertificates, " certificates loaded");
 	}
 
-	template<typename Socket>
-	bool Reseeder::ConnectViaProxy (Socket& socket, boost::asio::io_context& service, const http::URL& url, const http::URL& proxyUrl, boost::system::error_code& ecode)
+	bool ConnectViaProxy (boost::asio::ssl::stream<boost::asio::ip::tcp::socket>& socket, boost::asio::io_context& service, const http::URL& url, const http::URL& proxyUrl, boost::system::error_code& ecode)
 	{
 		auto it = boost::asio::ip::tcp::resolver(service).resolve (proxyUrl.host, std::to_string(proxyUrl.port), ecode);
 		if(ecode) return false;
 
-		// For SSL socket we need lowest_layer(), for plain socket just use it directly
-		auto& lowestLayer = [&socket]() -> auto& {
-			if constexpr (std::is_same_v<Socket, boost::asio::ip::tcp::socket>)
-				return socket;
-			else
-				return socket.lowest_layer();
-		}();
-
-		lowestLayer.connect(*it.begin(), ecode);
+		socket.lowest_layer().connect(*it.begin(), ecode);
 		if(ecode) return false;
-
-		// For proxy communication, SSL uses next_layer(), plain socket uses itself
-		auto& commLayer = [&socket]() -> auto& {
-			if constexpr (std::is_same_v<Socket, boost::asio::ip::tcp::socket>)
-				return socket;
-			else
-				return socket.next_layer();
-		}();
 
 		if(proxyUrl.schema == "http")
 		{
@@ -620,29 +603,29 @@ namespace i2p::data
 			std::ostream out(&writebuf);
 			out << proxyReq.to_string();
 
-			boost::asio::write(commLayer, writebuf.data(), boost::asio::transfer_all(), ecode);
+			boost::asio::write(socket.next_layer(), writebuf.data(), boost::asio::transfer_all(), ecode);
 			if (ecode)
 			{
-				commLayer.close();
+				socket.next_layer().close();
 				LogPrint(eLogError, "Reseed: HTTP CONNECT write error: ", ecode.message());
 				return false;
 			}
-			boost::asio::read_until(commLayer, readbuf, "\r\n\r\n", ecode);
+			boost::asio::read_until(socket.next_layer(), readbuf, "\r\n\r\n", ecode);
 			if (ecode)
 			{
-				commLayer.close();
+				socket.next_layer().close();
 				LogPrint(eLogError, "Reseed: HTTP CONNECT read error: ", ecode.message());
 				return false;
 			}
 			if(proxyRes.parse(std::string {boost::asio::buffers_begin(readbuf.data ()), boost::asio::buffers_begin(readbuf.data ()) + readbuf.size ()}) <= 0)
 			{
-				commLayer.close();
+				socket.next_layer().close();
 				LogPrint(eLogError, "Reseed: HTTP CONNECT malformed reply");
 				return false;
 			}
 			if(proxyRes.code != 200)
 			{
-				commLayer.close();
+				socket.next_layer().close();
 				LogPrint(eLogError, "Reseed: HTTP CONNECT got bad status: ", proxyRes.code);
 				return false;
 			}
@@ -651,7 +634,7 @@ namespace i2p::data
 		{
 			// assume socks if not http
 			bool success = false;
-			transport::Socks5Handshake (commLayer, std::make_pair(url.host, url.port),
+			transport::Socks5Handshake (socket.next_layer(), std::make_pair(url.host, url.port),
 				[&success](const boost::system::error_code& ec)
 			    {
 					if (!ec)
@@ -662,24 +645,18 @@ namespace i2p::data
 			service.run ();
 			if (!success)
 			{
-				commLayer.close();
+				socket.next_layer().close();
 				return false;
 			}
 		}
 		return true;
 	}
 
-	template<typename Socket>
-	bool Reseeder::ConnectDirect (Socket& socket, boost::asio::io_context& service, const http::URL& url, boost::system::error_code& ecode)
+	bool ConnectDirect (boost::asio::ssl::stream<boost::asio::ip::tcp::socket>& socket,
+		boost::asio::io_context& service,
+		const http::URL& url, boost::system::error_code& ecode)
 	{
-		auto& lowestLayer = [&socket]() -> auto& {
-			if constexpr (std::is_same_v<Socket, boost::asio::ip::tcp::socket>)
-				return socket;
-			else
-				return socket.lowest_layer();
-		}();
-
-		auto endpoints = boost::asio::ip::tcp::resolver(service).resolve(url.host, std::to_string(url.port), ecode);
+		const auto endpoints = boost::asio::ip::tcp::resolver(service).resolve(url.host, std::to_string(url.port), ecode);
 		if (ecode) return false;
 
 		bool connected = false;
@@ -697,7 +674,7 @@ namespace i2p::data
 			}
 			if (supported)
 			{
-				lowestLayer.connect(ep, ecode);
+				socket.lowest_layer().connect(ep, ecode);
 				if (!ecode)
 				{
 					LogPrint(eLogDebug, "Reseed: Connected to ", ep.address());
@@ -714,62 +691,7 @@ namespace i2p::data
 		return true;
 	}
 
-	std::string Reseeder::ConnectAndReseed (http::URL& url, const http::URL& proxyUrl, bool isHttps)
-	{
-		boost::asio::io_context service;
-		boost::system::error_code ecode;
-
-		if (!isHttps)
-		{
-			// HTTP with plain TCP socket
-			boost::asio::ip::tcp::socket s(service);
-
-			bool connected = false;
-			if (!proxyUrl.schema.empty())
-				connected = ConnectViaProxy(s, service, url, proxyUrl, ecode);
-			else
-				connected = ConnectDirect(s, service, url, ecode);
-
-			if (connected && !ecode)
-			{
-				LogPrint(eLogDebug, "Reseed: Connected to ", url.host, ":", url.port);
-				return ReseedRequest(s, url.to_string());
-			}
-		}
-		else
-		{
-			// HTTPS with SSL socket
-			boost::asio::ssl::context ctx(boost::asio::ssl::context::sslv23);
-			ctx.set_verify_mode(boost::asio::ssl::context::verify_none);
-			boost::asio::ssl::stream<boost::asio::ip::tcp::socket> s(service, ctx);
-
-			bool connected = false;
-			if (!proxyUrl.schema.empty())
-				connected = ConnectViaProxy(s, service, url, proxyUrl, ecode);
-			else
-				connected = ConnectDirect(s, service, url, ecode);
-
-			if (connected && !ecode)
-			{
-				// Perform SSL handshake
-				SSL_set_tlsext_host_name(s.native_handle(), url.host.c_str());
-				s.handshake(boost::asio::ssl::stream_base::client, ecode);
-				if (!ecode)
-				{
-					LogPrint(eLogDebug, "Reseed: Connected to ", url.host, ":", url.port);
-					return ReseedRequest(s, url.to_string());
-				}
-				LogPrint(eLogError, "Reseed: SSL handshake failed: ", ecode.message());
-				return "";
-			}
-		}
-
-		LogPrint(eLogError, "Reseed: Couldn't connect to ", url.host, ": ", ecode.message());
-		return "";
-	}
-
-
-	std::string Reseeder::HttpsRequest (const std::string& address, bool isHttps)
+	std::string Reseeder::HttpsRequest (const std::string& address)
 	{
 		http::URL proxyUrl;
 		std::string proxy; config::GetOption("reseed.proxy", proxy);
@@ -797,11 +719,44 @@ namespace i2p::data
 			LogPrint(eLogCritical, "Reseed: Failed to parse url: ", address);
 			return "";
 		}
-		url.schema = isHttps ? "https" : "http";
+		url.schema = "https";
 		if (!url.port)
-			url.port = isHttps ? 443 : 80;
+			url.port = 443;
 
-		return ConnectAndReseed(url, proxyUrl, isHttps);
+		return ConnectAndReseed(url, proxyUrl);
+	}
+
+	std::string Reseeder::ConnectAndReseed (http::URL& url, const http::URL& proxyUrl)
+	{
+		boost::asio::io_context service;
+		boost::system::error_code ecode;
+
+		boost::asio::ssl::context ctx(boost::asio::ssl::context::sslv23);
+		ctx.set_verify_mode(boost::asio::ssl::context::verify_none);
+		boost::asio::ssl::stream<boost::asio::ip::tcp::socket> s(service, ctx);
+
+		bool connected = false;
+		if (!proxyUrl.schema.empty())
+			connected = ConnectViaProxy(s, service, url, proxyUrl, ecode);
+		else
+			connected = ConnectDirect(s, service, url, ecode);
+
+		if (connected && !ecode)
+		{
+			// Perform SSL handshake
+			SSL_set_tlsext_host_name(s.native_handle(), url.host.c_str());
+			s.handshake(boost::asio::ssl::stream_base::client, ecode);
+			if (!ecode)
+			{
+				LogPrint(eLogDebug, "Reseed: Connected to ", url.host, ":", url.port);
+				return ReseedRequest(s, url.to_string());
+			}
+			LogPrint(eLogError, "Reseed: SSL handshake failed: ", ecode.message());
+			return "";
+		}
+
+		LogPrint(eLogError, "Reseed: Couldn't connect to ", url.host, ": ", ecode.message());
+		return "";
 	}
 
 	template<typename Stream>

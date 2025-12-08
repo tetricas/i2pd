@@ -97,6 +97,10 @@ namespace config {
 			("http.webroot", value<std::string>()->default_value("/"),          "WebUI root path (default: / )")
 			("http.lang", value<std::string>()->default_value("english"),       "WebUI language (default: english )")
 			("http.showTotalTCSR", value<bool>()->default_value(false),         "Show additional value with total TCSR since router's start (default: false)")
+			("http.ssl", value<bool>()->default_value(false),                   "Enable HTTPS for /router.info endpoint")
+			("http.sslport", value<uint16_t>()->default_value(7071),            "HTTPS port for /router.info endpoint")
+			("http.sslcert", value<std::string>()->default_value("httpd.crt"),  "Path to SSL certificate file")
+			("http.sslkey", value<std::string>()->default_value("httpd.key"),   "Path to SSL private key file")
 		;
 
 		options_description httpproxy("HTTP Proxy options");
