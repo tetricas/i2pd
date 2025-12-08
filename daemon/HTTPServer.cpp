@@ -8,6 +8,7 @@
 
 #include <iomanip>
 #include <sstream>
+#include <fstream>
 #include <thread>
 #include <memory>
 
@@ -19,6 +20,7 @@
 #include <openssl/evp.h>
 #include <openssl/rsa.h>
 #include <openssl/bn.h>
+#include <openssl/sha.h>
 
 #include "Base.h"
 #include "FS.h"
@@ -1832,6 +1834,35 @@ namespace http {
 			LogPrint (eLogInfo, "HTTPServer: Saving new cert to ", crt_path);
 			PEM_write_X509 (f, x509);
 			fclose (f);
+
+			// Calculate SHA256 fingerprint and save to file
+			unsigned char hash[SHA256_DIGEST_LENGTH];
+			unsigned int hashLen = SHA256_DIGEST_LENGTH;
+			unsigned char* certDER = NULL;
+			int certDERLen = i2d_X509(x509, &certDER);
+			if (certDERLen > 0 && certDER)
+			{
+				SHA256(certDER, certDERLen, hash);
+				OPENSSL_free(certDER);
+
+				// Convert to hex string
+				std::ostringstream hashStr;
+				for (unsigned int i = 0; i < hashLen; i++)
+					hashStr << std::hex << std::setw(2) << std::setfill('0') << (int)hash[i];
+
+				// Write to hash file
+				std::string hashFilePath = std::string(crt_path) + "_hash.txt";
+				std::ofstream hashFile(hashFilePath);
+				if (hashFile)
+				{
+					hashFile << hashStr.str() << std::endl;
+					hashFile.close();
+					LogPrint(eLogInfo, "HTTPServer: Certificate SHA256 fingerprint: ", hashStr.str());
+					LogPrint(eLogInfo, "HTTPServer: Fingerprint saved to ", hashFilePath);
+				}
+				else
+					LogPrint(eLogError, "HTTPServer: Can't write hash file: ", hashFilePath);
+			}
 		}
 		else
 			LogPrint (eLogError, "HTTPServer: Can't write cert: ", strerror(errno));

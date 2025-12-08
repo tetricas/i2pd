@@ -14,6 +14,8 @@
 #include <boost/algorithm/string.hpp>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <openssl/sha.h>
+#include <openssl/x509.h>
 #if (OPENSSL_VERSION_NUMBER >= 0x030000000) // since 3.0.0
 #include <openssl/core_names.h>
 #endif
@@ -731,6 +733,10 @@ namespace i2p::data
 		boost::asio::io_context service;
 		boost::system::error_code ecode;
 
+		// Check if certificate verification is enabled
+		bool verify; config::GetOption("reseed.verify", verify);
+		std::string certHash; config::GetOption("reseed.cert", certHash);
+
 		boost::asio::ssl::context ctx(boost::asio::ssl::context::sslv23);
 		ctx.set_verify_mode(boost::asio::ssl::context::verify_none);
 		boost::asio::ssl::stream<boost::asio::ip::tcp::socket> s(service, ctx);
@@ -748,6 +754,52 @@ namespace i2p::data
 			s.handshake(boost::asio::ssl::stream_base::client, ecode);
 			if (!ecode)
 			{
+				if (verify && certHash.empty())
+				{
+					LogPrint(eLogInfo, "Verification is set, but cert hash is empty - verification was failed");
+					return "";
+				}
+				// Verify certificate fingerprint if pinning is enabled
+				if (verify && !certHash.empty())
+				{
+					LogPrint(eLogInfo, "Verification is set - ssl verification is activated");
+					X509* cert = SSL_get_peer_certificate(s.native_handle());
+					if (!cert)
+					{
+						LogPrint(eLogError, "Reseed: No certificate presented by ", url.host);
+						return "";
+					}
+
+					// Calculate SHA256 fingerprint
+					unsigned char hash[SHA256_DIGEST_LENGTH];
+					unsigned char* certDER = NULL;
+					int certDERLen = i2d_X509(cert, &certDER);
+					if (certDERLen > 0 && certDER)
+					{
+						SHA256(certDER, certDERLen, hash);
+						OPENSSL_free(certDER);
+
+						// Convert to hex string
+						std::ostringstream hashStr;
+						for (int i = 0; i < SHA256_DIGEST_LENGTH; i++)
+							hashStr << std::hex << std::setw(2) << std::setfill('0') << (int)hash[i];
+
+						// Compare with expected hash
+						if (hashStr.str() != certHash)
+						{
+							LogPrint(eLogError, "Reseed: Certificate fingerprint mismatch for ", url.host);
+							LogPrint(eLogError, "Reseed: Expected: ", certHash);
+							LogPrint(eLogError, "Reseed: Got:      ", hashStr.str());
+							X509_free(cert);
+							return "";
+						}
+						LogPrint(eLogInfo, "Reseed: Certificate fingerprint verified for ", url.host);
+					}
+					X509_free(cert);
+				}
+				else if (!verify)
+					LogPrint(eLogInfo, "Verification is not set - accept self-signed certs");
+
 				LogPrint(eLogDebug, "Reseed: Connected to ", url.host, ":", url.port);
 				return ReseedRequest(s, url.to_string());
 			}

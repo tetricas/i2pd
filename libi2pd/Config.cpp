@@ -229,7 +229,8 @@ namespace config {
 
 		options_description reseed("Reseed options");
 		reseed.add_options()
-			("reseed.verify", value<bool>()->default_value(false),        "Verify .su3 signature")
+			("reseed.verify", value<bool>()->default_value(false),        "Verify .su3 signature and SSL certificates")
+			("reseed.cert", value<std::string>()->default_value(""),      "SHA256 hash of SSL certificate to verify (for certificate pinning)")
 			("reseed.threshold", value<uint16_t>()->default_value(25),    "Minimum number of known routers before requesting reseed")
 			("reseed.floodfill", value<std::string>()->default_value(""), "Path to local router.info file to reseed from")
 			("reseed.file", value<std::string>()->default_value(""),      "Path to local .su3 file or HTTPS URL to reseed from")
