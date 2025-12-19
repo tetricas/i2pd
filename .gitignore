@@ -58,6 +58,11 @@ local.properties
 # PDT-specific
 .buildpath
 
+#################
+## JetBrains
+#################
+.idea
+
 
 #################
 ## Visual Studio
@@ -256,8 +261,14 @@ docs/generated
 # gdb files
 .gdb_history
 
-# cmake makefile
+# CMake build artifacts
 build/Makefile
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+*.cmake
+!CMakeLists.txt
+general_tests/build*
 
 # debian stuff
 debian/i2pd.1.gz

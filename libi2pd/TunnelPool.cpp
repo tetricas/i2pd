@@ -214,14 +214,22 @@ namespace tunnel
 		i2p::data::RouterInfo::CompatibleTransports compatible)
 	{
 		std::unique_lock<std::mutex> l(m_OutboundTunnelsMutex);
-		return GetNextTunnel (m_OutboundTunnels, excluded, compatible);
+		auto tunnel = GetNextTunnel (m_OutboundTunnels, excluded, compatible);
+		if (tunnel) {
+			LogPrint (eLogDebug, "TunnelPool: Selected outbound tunnel with ", tunnel->GetNumHops(), " hops for packet transmission");
+		}
+		return tunnel;
 	}
 
 	std::shared_ptr<InboundTunnel> TunnelPool::GetNextInboundTunnel (std::shared_ptr<InboundTunnel> excluded,
 		i2p::data::RouterInfo::CompatibleTransports compatible)
 	{
 		std::unique_lock<std::mutex> l(m_InboundTunnelsMutex);
-		return GetNextTunnel (m_InboundTunnels, excluded, compatible);
+		auto tunnel = GetNextTunnel (m_InboundTunnels, excluded, compatible);
+		if (tunnel) {
+			LogPrint (eLogDebug, "TunnelPool: Selected inbound tunnel with ", tunnel->GetNumHops(), " hops for packet reception");
+		}
+		return tunnel;
 	}
 
 	template<class TTunnels>
@@ -698,6 +706,7 @@ namespace tunnel
 	void TunnelPool::CreateInboundTunnel ()
 	{
 		LogPrint (eLogDebug, "Tunnels: Creating destination inbound tunnel...");
+		LogPrint (eLogInfo, "TunnelPool: Creating inbound tunnel with ", m_NumInboundHops, " hops for destination");
 		Path path;
 		if (SelectPeers (path, true))
 		{
@@ -750,6 +759,7 @@ namespace tunnel
 	void TunnelPool::CreateOutboundTunnel ()
 	{
 		LogPrint (eLogDebug, "Tunnels: Creating destination outbound tunnel...");
+		LogPrint (eLogInfo, "TunnelPool: Creating outbound tunnel with ", m_NumOutboundHops, " hops for destination");
 		Path path;
 		if (SelectPeers (path, false))
 		{

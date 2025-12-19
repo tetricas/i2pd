@@ -2,6 +2,7 @@
 /CMakeFiles/
 /Testing/
 /tests/
+/tests_client/
 /.ninja_*
 /arch.c
 /build.ninja

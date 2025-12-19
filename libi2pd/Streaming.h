@@ -49,6 +49,7 @@ namespace stream
 	const uint16_t PACKET_FLAG_ECHO = 0x0200;
 	const uint16_t PACKET_FLAG_NO_ACK = 0x0400;
 	const uint16_t PACKET_FLAG_OFFLINE_SIGNATURE = 0x0800;
+	const uint16_t PACKET_FLAG_SIMPLE_MESSAGE = 0x1000;
 
 	const size_t STREAMING_MTU = 1730;
 	const size_t STREAMING_MTU_RATCHETS = 1812;
@@ -85,6 +86,12 @@ namespace stream
 	const bool LOSS_BASED_CONTROL_ENABLED = 0; // 0/1
 	const uint64_t STREAMING_DESTINATION_POOLS_CLEANUP_INTERVAL = 646; // in seconds
 	
+	// Constants for simplified messaging
+	const uint8_t SIMPLE_MESSAGE_ECHO_REQUEST = 0x01;
+	const uint8_t SIMPLE_MESSAGE_ECHO_RESPONSE = 0x02;  
+	const uint8_t SIMPLE_MESSAGE_DATA_ONLY = 0x03;
+	const size_t SIMPLE_MESSAGE_HEADER_SIZE = 5; // type(1) + seq(2) + len(2)
+	
 	struct Packet
 	{
 		size_t len, offset;
@@ -113,6 +120,7 @@ namespace stream
 		bool IsSYN () const { return GetFlags () & PACKET_FLAG_SYNCHRONIZE; };
 		bool IsNoAck () const { return GetFlags () & PACKET_FLAG_NO_ACK; };
 		bool IsEcho () const { return GetFlags () & PACKET_FLAG_ECHO; };
+		bool IsSimpleMessage () const { return GetFlags () & PACKET_FLAG_SIMPLE_MESSAGE; };
 	};
 
 	struct PacketCmp
@@ -206,6 +214,12 @@ namespace stream
 			size_t Send (const uint8_t * buf, size_t len);
 			void AsyncSend (const uint8_t * buf, size_t len, SendHandler handler);
 			void SendPing ();
+			void SendSimpleMessage (const uint8_t * buf, size_t len);
+			void HandleSimpleMessage (Packet * packet);
+			
+			// Simplified send-receive methods
+			void SimpleSend (const std::string& data, bool expectResponse = false);
+			std::string SimpleReceive (int timeout_ms = 10000);
 
 			template<typename Buffer, typename ReceiveHandler>
 			void AsyncReceive (const Buffer& buffer, ReceiveHandler handler, int timeout = 0);
@@ -241,6 +255,7 @@ namespace stream
 
 			void SavePacket (Packet * packet);
 			void ProcessPacket (Packet * packet);
+			void ProcessSavedPackets ();
 			bool ProcessOptions (uint16_t flags, Packet * packet);
 			void ProcessAck (Packet * packet);
 			size_t ConcatenatePackets (uint8_t * buf, size_t len);
@@ -317,6 +332,11 @@ namespace stream
 			uint64_t m_JitterAccum;
 			int m_JitterDiv;
 			size_t m_MTU;
+			
+			// Simplified messaging state
+			uint16_t m_SimpleSeqNumber;
+			std::queue<std::string> m_SimpleMessageQueue;
+			std::mutex m_SimpleMessageMutex;
 	};
 
 	class StreamingDestination: public std::enable_shared_from_this<StreamingDestination>
@@ -324,6 +344,7 @@ namespace stream
 		public:
 
 			typedef std::function<void (std::shared_ptr<Stream>)> Acceptor;
+			typedef std::function<std::string (const std::string&, const i2p::data::IdentHash&)> SimpleMessageHandler;
 
 			StreamingDestination (std::shared_ptr<i2p::client::ClientDestination> owner, uint16_t localPort = 0, bool gzip = false);
 			~StreamingDestination ();
@@ -342,6 +363,11 @@ namespace stream
 			void AcceptOnce (const Acceptor& acceptor);
 			void AcceptOnceAcceptor (std::shared_ptr<Stream> stream, Acceptor acceptor, Acceptor prev);
 			std::shared_ptr<Stream> AcceptStream (int timeout = 0); // sync
+			
+			void SetSimpleMessageHandler (const SimpleMessageHandler& handler);
+			void ResetSimpleMessageHandler ();
+			bool IsSimpleMessageHandlerSet () const { return m_SimpleMessageHandler != nullptr; };
+			std::string CallSimpleMessageHandler (const std::string& message, const i2p::data::IdentHash& clientHash) const;
 
 			std::shared_ptr<i2p::client::ClientDestination> GetOwner () const { return m_Owner; };
 			void SetOwner (std::shared_ptr<i2p::client::ClientDestination> owner) { m_Owner = owner; };
@@ -370,6 +396,7 @@ namespace stream
 			std::unordered_map<uint32_t, std::shared_ptr<Stream> > m_IncomingStreams; // receiveStreamID->stream
 			std::shared_ptr<Stream> m_LastStream;
 			Acceptor m_Acceptor;
+			SimpleMessageHandler m_SimpleMessageHandler;
 			std::list<std::shared_ptr<Stream> > m_PendingIncomingStreams;
 			boost::asio::deadline_timer m_PendingIncomingTimer;
 			std::unordered_map<uint32_t, std::list<Packet *> > m_SavedPackets; // receiveStreamID->packets, arrived before SYN

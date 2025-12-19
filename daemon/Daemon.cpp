@@ -340,7 +340,7 @@ namespace util
 		i2p::context.Start();
 
 		LogPrint(eLogInfo, "Daemon: Starting Client");
-		i2p::client::context.Start ();
+		//i2p::client::context.Start ();
 
 		// I2P Control Protocol
 		bool i2pcontrol; i2p::config::GetOption("i2pcontrol.enabled", i2pcontrol);

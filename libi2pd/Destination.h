@@ -267,6 +267,8 @@ namespace client
 			void StopAcceptingStreams ();
 			bool IsAcceptingStreams () const;
 			void AcceptOnce (const i2p::stream::StreamingDestination::Acceptor& acceptor);
+			bool SetSimpleMessageHandler (const stream::StreamingDestination::SimpleMessageHandler& handler);
+			bool ResetSimpleMessageHandler ();
 			int GetStreamingAckDelay () const { return m_StreamingAckDelay; }
 			int GetStreamingOutboundSpeed () const { return m_StreamingOutboundSpeed; }
 			int GetStreamingInboundSpeed () const { return m_StreamingInboundSpeed; }

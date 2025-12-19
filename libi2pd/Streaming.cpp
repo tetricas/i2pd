@@ -14,6 +14,9 @@
 #include "Timestamp.h"
 #include "Destination.h"
 #include "Streaming.h"
+#include <chrono>
+#include <ranges>
+#include <thread>
 
 namespace i2p
 {
@@ -101,7 +104,8 @@ namespace stream
 		m_Jitter (0), m_MinPacingTime (0),
 		m_PacingTime (INITIAL_PACING_TIME), m_PacingTimeRem (0), m_LastSendTime (0), m_LastACKRecieveTime (0), m_ACKRecieveInterval (local.GetOwner ()->GetStreamingAckDelay ()), m_RemoteLeaseChangeTime (0), m_LastWindowIncTime (0), m_LastACKRequestTime (0),
 		m_LastACKSendTime (0), m_PacketACKInterval (1), m_PacketACKIntervalRem (0), // for limit inbound speed
-		m_NumResendAttempts (0), m_NumPacketsToSend (0), m_JitterAccum (0), m_JitterDiv (1), m_MTU (STREAMING_MTU)
+		m_NumResendAttempts (0), m_NumPacketsToSend (0), m_JitterAccum (0), m_JitterDiv (1), m_MTU (STREAMING_MTU),
+		m_SimpleSeqNumber (0)
 	{
 		RAND_bytes ((uint8_t *)&m_RecvStreamID, 4);
 		m_RemoteIdentity = remote->GetIdentity ();
@@ -131,7 +135,8 @@ namespace stream
 		m_PrevRTTSample (INITIAL_RTT), m_Jitter (0), m_MinPacingTime (0),
 		m_PacingTime (INITIAL_PACING_TIME), m_PacingTimeRem (0), m_LastSendTime (0), m_LastACKRecieveTime (0), m_ACKRecieveInterval (local.GetOwner ()->GetStreamingAckDelay ()), m_RemoteLeaseChangeTime (0), m_LastWindowIncTime (0), m_LastACKRequestTime (0),
 		m_LastACKSendTime (0), m_PacketACKInterval (1), m_PacketACKIntervalRem (0), // for limit inbound speed
-		m_NumResendAttempts (0), m_NumPacketsToSend (0), m_JitterAccum (0), m_JitterDiv (1), m_MTU (STREAMING_MTU)
+		m_NumResendAttempts (0), m_NumPacketsToSend (0), m_JitterAccum (0), m_JitterDiv (1), m_MTU (STREAMING_MTU),
+		m_SimpleSeqNumber (0)
 	{
 		RAND_bytes ((uint8_t *)&m_RecvStreamID, 4);
 		auto outboundSpeed = local.GetOwner ()->GetStreamingOutboundSpeed ();
@@ -249,8 +254,12 @@ namespace stream
 			ProcessPacket (packet);
 			if (m_Status == eStreamStatusTerminated) return;
 			
-			// we should also try stored messages if any
-			for (auto it = m_SavedPackets.begin (); it != m_SavedPackets.end ();)
+			// Process saved packets in larger batches to reduce buffering delays
+			int processedCount = 0;
+			// AGGRESSIVE batch size for high-throughput transfers - process up to 4096 packets per iteration
+			// This dramatically reduces buffering delays during bulk file transfers
+			const int MAX_BATCH_SIZE = 4096;
+			for (auto it = m_SavedPackets.begin (); it != m_SavedPackets.end () && processedCount < MAX_BATCH_SIZE;)
 			{
 				if ((*it)->GetSeqn () == (uint32_t)(m_LastReceivedSequenceNumber + 1))
 				{
@@ -258,10 +267,16 @@ namespace stream
 					m_SavedPackets.erase (it++);
 
 					ProcessPacket (savedPacket);
+					processedCount++;
 					if (m_Status == eStreamStatusTerminated) return;
 				}
 				else
 					break;
+			}
+			
+			// Log batch processing for optimization tracking
+			if (processedCount > 0) {
+				LogPrint (eLogDebug, "Streaming: Processed batch of ", processedCount, " saved packets, ", m_SavedPackets.size(), " remaining");
 			}
 
 			// schedule ack for last message
@@ -358,8 +373,53 @@ namespace stream
 
 	void Stream::SavePacket (Packet * packet)
 	{
+		// Prevent memory exhaustion from excessive saved packets
+		if (m_SavedPackets.size() >= 16384) { // 16K packet limit vs unlimited accumulation
+			LogPrint (eLogWarning, "Streaming: SavedPackets limit reached (", m_SavedPackets.size(), ") - dropping packet ", packet->GetSeqn());
+			m_LocalDestination.DeletePacket (packet);
+			return;
+		}
+		
 		if (!m_SavedPackets.insert (packet).second)
 			m_LocalDestination.DeletePacket (packet);
+		
+		// Trigger aggressive batch processing during high-throughput periods
+		// When we accumulate many saved packets, immediately try to process them
+		if (m_SavedPackets.size() >= 1024) { // High-throughput threshold
+			LogPrint (eLogDebug, "Streaming: High-throughput detected (", m_SavedPackets.size(), " saved packets) - triggering batch processing");
+			ProcessSavedPackets();
+		}
+	}
+
+	void Stream::ProcessSavedPackets ()
+	{
+		// Aggressive batch processing for high-throughput transfers
+		int processedCount = 0;
+		const int MAX_BATCH_SIZE = 4096; // Process up to 4K packets per call
+		
+		for (auto it = m_SavedPackets.begin (); it != m_SavedPackets.end () && processedCount < MAX_BATCH_SIZE;)
+		{
+			if ((*it)->GetSeqn () == (uint32_t)(m_LastReceivedSequenceNumber + 1))
+			{
+				Packet * savedPacket = *it;
+				m_SavedPackets.erase (it++);
+				
+				ProcessPacket (savedPacket);
+				processedCount++;
+				if (m_Status == eStreamStatusTerminated) return;
+			}
+			else
+				break;
+		}
+		
+		// Log aggressive batch processing results and wake up any waiting receives
+		if (processedCount > 0) {
+			LogPrint (eLogDebug, "Streaming: Aggressive batch processed ", processedCount, " saved packets, ", m_SavedPackets.size(), " remaining");
+			// Wake up any blocked receives immediately after aggressive processing
+			if (!m_ReceiveQueue.empty()) {
+				m_ReceiveTimer.cancel();
+			}
+		}
 	}
 
 	void Stream::ProcessPacket (Packet * packet)
@@ -597,19 +657,22 @@ namespace stream
 		uint16_t flags = packet->GetFlags ();
 		if (ProcessOptions (flags, packet) && m_RemoteIdentity)
 		{
-			// send pong
-			Packet p;
-			memset (p.buf, 0, 22); // minimal header all zeroes
-			memcpy (p.buf + 4, packet->buf, 4); // but receiveStreamID is the sendStreamID from the ping
-			htobe16buf (p.buf + 18, PACKET_FLAG_ECHO); // and echo flag
 			auto payloadLen = int(packet->len) - (packet->GetPayload () - packet->buf);
-			if (payloadLen > 0)
-				memcpy (p.buf + 22, packet->GetPayload (), payloadLen);
-			else
-				payloadLen = 0;
-			p.len = payloadLen + 22;
-			SendPackets (std::vector<Packet *> { &p });
-			LogPrint (eLogDebug, "Streaming: Pong of ", p.len, " bytes sent");
+			// Handle as regular ping/pong
+			{
+				// send pong
+				Packet p;
+				memset (p.buf, 0, 22); // minimal header all zeroes
+				memcpy (p.buf + 4, packet->buf, 4); // but receiveStreamID is the sendStreamID from the ping
+				htobe16buf (p.buf + 18, PACKET_FLAG_ECHO); // and echo flag
+				if (payloadLen > 0)
+					memcpy (p.buf + 22, packet->GetPayload (), payloadLen);
+				else
+					payloadLen = 0;
+				p.len = payloadLen + 22;
+				SendPackets (std::vector<Packet *> { &p });
+				LogPrint (eLogDebug, "Streaming: Pong of ", p.len, " bytes sent");
+			}
 		}
 		m_LocalDestination.DeletePacket (packet);
 	}
@@ -1205,6 +1268,183 @@ namespace stream
 		LogPrint (eLogDebug, "Streaming: Ping of ", p.len, " bytes sent");
 	}
 
+	void Stream::HandleSimpleMessage (Packet * packet)
+	{
+		uint16_t flags = packet->GetFlags ();
+		if (ProcessOptions (flags, packet) && m_RemoteIdentity)
+		{
+			auto payloadLen = int(packet->len) - (packet->GetPayload () - packet->buf);
+			std::string payl (packet->GetPayload (), packet->GetPayload () + payloadLen);
+			LogPrint (eLogInfo, "HandleSimpleMessage: Payload ", payl);
+			
+			// Check if this is a simple message (has our header format)
+			if (payloadLen < SIMPLE_MESSAGE_HEADER_SIZE)
+			{
+				LogPrint (eLogWarning, "Streaming: PayloadLen is smaller that header size: ",
+							SIMPLE_MESSAGE_HEADER_SIZE, ", actual=", payloadLen);
+				m_LocalDestination.DeletePacket (packet);
+				return;
+			}
+			const uint8_t* payload = packet->GetPayload();
+			uint8_t msgType = payload[0];
+
+			// Check if it's one of our simple message types
+			if (msgType == SIMPLE_MESSAGE_ECHO_REQUEST ||
+				msgType == SIMPLE_MESSAGE_ECHO_RESPONSE ||
+				msgType == SIMPLE_MESSAGE_DATA_ONLY)
+			{
+				uint16_t seqNum = bufbe16toh(payload + 1);
+				uint16_t dataLen = bufbe16toh(payload + 3);
+
+				// Validate message format
+				if (SIMPLE_MESSAGE_HEADER_SIZE + dataLen != payloadLen)
+				{
+					LogPrint (eLogWarning, "Streaming: Invalid simple message format, expected len=",
+								SIMPLE_MESSAGE_HEADER_SIZE + dataLen, ", actual=", payloadLen);
+					m_LocalDestination.DeletePacket (packet);
+					return;
+				}
+
+				// Extract the full message and add to queue
+				std::string message(reinterpret_cast<const char*>(payload), payloadLen);
+
+				{
+					std::unique_lock lock(m_SimpleMessageMutex);
+					m_SimpleMessageQueue.push(message);
+				}
+
+				LogPrint (eLogInfo, "Streaming: Simple message received, type=", (int)msgType,
+					", seq=", seqNum, ", dataLen=", dataLen);
+
+				// Send response if requested (echo request)
+				if (msgType == SIMPLE_MESSAGE_ECHO_REQUEST && dataLen > 0)
+				{
+					std::string requestData(reinterpret_cast<const char*>(payload + SIMPLE_MESSAGE_HEADER_SIZE), dataLen);
+					std::string responseData;
+
+					// Check if there's a custom handler
+					bool hasHandler = m_LocalDestination.IsSimpleMessageHandlerSet();
+					LogPrint(eLogInfo, "Streaming: Checking for custom handler, hasHandler=", hasHandler);
+					if (hasHandler)
+					{
+						// Call custom handler
+						if (m_RemoteIdentity) {
+							responseData = m_LocalDestination.CallSimpleMessageHandler(requestData, m_RemoteIdentity->GetIdentHash());
+							LogPrint (eLogInfo, "Streaming: Custom simple message handler called, response len=", responseData.size());
+						} else {
+							LogPrint (eLogError, "Streaming: Remote identity not available for simple message handler");
+							responseData = "error: remote identity not available";
+						}
+					}
+					else
+					{
+						// Default echo behavior
+						responseData = "echo: " + requestData;
+						LogPrint (eLogInfo, "Streaming: Using default echo behavior");
+					}
+
+					// Create echo response message
+					std::vector<uint8_t> response(SIMPLE_MESSAGE_HEADER_SIZE + responseData.size());
+					response[0] = SIMPLE_MESSAGE_ECHO_RESPONSE;
+					htobe16buf(&response[1], seqNum); // same sequence number
+					htobe16buf(&response[3], responseData.size());
+					memcpy(&response[SIMPLE_MESSAGE_HEADER_SIZE], responseData.data(), responseData.size());
+
+					// Send response back via simple message
+					SendSimpleMessage(response.data(), response.size());
+					LogPrint (eLogInfo, "Streaming: Simple message response sent, dataLen=", responseData.size());
+				}
+			}
+		}
+		m_LocalDestination.DeletePacket (packet);
+	}
+
+	void Stream::SendSimpleMessage (const uint8_t * buf, size_t len)
+	{
+		LogPrint (eLogInfo, "Streaming: SendSimpleMessage sSID=", m_SendStreamID, " rSID=", m_RecvStreamID);
+		Packet p;
+		uint8_t * packet = p.GetBuffer ();
+		size_t size = 0;
+		htobe32buf (packet, m_SendStreamID);
+		size += 4; // sendStreamID
+		htobe32buf (packet, m_RecvStreamID);
+		size += 4; // recvStreamID
+		memset (packet + size, 0, 10);
+		size += 10; // all zeroes
+		uint16_t flags = PACKET_FLAG_SIMPLE_MESSAGE | PACKET_FLAG_SIGNATURE_INCLUDED | PACKET_FLAG_FROM_INCLUDED;
+		bool isOfflineSignature = m_LocalDestination.GetOwner ()->GetPrivateKeys ().IsOfflineSignature ();
+		if (isOfflineSignature) flags |= PACKET_FLAG_OFFLINE_SIGNATURE;
+		htobe16buf (packet + size, flags);
+		size += 2; // flags
+		size_t identityLen = m_LocalDestination.GetOwner ()->GetIdentity ()->GetFullLen ();
+		size_t signatureLen = m_LocalDestination.GetOwner ()->GetPrivateKeys ().GetSignatureLen ();
+		uint8_t * optionsSize = packet + size; // set options size later
+		size += 2; // options size
+		m_LocalDestination.GetOwner ()->GetIdentity ()->ToBuffer (packet + size, identityLen);
+		size += identityLen; // from
+		if (isOfflineSignature)
+		{
+			const auto& offlineSignature = m_LocalDestination.GetOwner ()->GetPrivateKeys ().GetOfflineSignature ();
+			memcpy (packet + size, offlineSignature.data (), offlineSignature.size ());
+			size += offlineSignature.size (); // offline signature
+		}
+		uint8_t * signature = packet + size; // set it later
+		memset (signature, 0, signatureLen); // zeroes for now
+		size += signatureLen; // signature
+		htobe16buf (optionsSize, packet + size - 2 - optionsSize); // actual options size
+		if (buf && len > 0)
+		{
+			memcpy (const_cast<uint8_t*>(p.GetPayload()), buf, len);
+			size += len;
+		}
+		m_LocalDestination.GetOwner ()->Sign (packet, size, signature);
+		p.len = size;
+		SendPackets (std::vector{ &p });
+		LogPrint (eLogDebug, "Streaming: Simple message of ", p.len, " bytes sent");
+	}
+	
+	void Stream::SimpleSend (const std::string& data, bool expectResponse)
+	{
+		if (data.size() > MAX_PACKET_SIZE - SIMPLE_MESSAGE_HEADER_SIZE)
+			return;
+			
+		std::vector<uint8_t> message(SIMPLE_MESSAGE_HEADER_SIZE + data.size());
+		
+		uint8_t msg_type = expectResponse ? SIMPLE_MESSAGE_ECHO_REQUEST : SIMPLE_MESSAGE_DATA_ONLY;
+		message[0] = msg_type;
+		htobe16buf(&message[1], ++m_SimpleSeqNumber);
+		htobe16buf(&message[3], data.size());
+		memcpy(&message[SIMPLE_MESSAGE_HEADER_SIZE], data.data(), data.size());
+		
+		SendSimpleMessage(message.data(), message.size());
+		LogPrint (eLogDebug, "Streaming: SimpleSend, type=", (int)msg_type, ", len=", data.size());
+	}
+	
+	std::string Stream::SimpleReceive (int timeout_ms)
+	{
+		auto start_time = std::chrono::steady_clock::now();
+		
+		while (std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::steady_clock::now() - start_time).count() < timeout_ms)
+		{
+			std::string message;
+			{
+				std::unique_lock lock(m_SimpleMessageMutex);
+				if (!m_SimpleMessageQueue.empty())
+				{
+					message = m_SimpleMessageQueue.front();
+					m_SimpleMessageQueue.pop();
+				}
+			}
+			if (message.size() > SIMPLE_MESSAGE_HEADER_SIZE)
+				return message.substr(SIMPLE_MESSAGE_HEADER_SIZE);
+
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+		
+		return ""; // timeout
+	}
+
 	void Stream::Close ()
 	{
 		LogPrint(eLogDebug, "Streaming: closing stream with sSID=", m_SendStreamID, ", rSID=", m_RecvStreamID, ", status=", m_Status);
@@ -1397,6 +1637,9 @@ namespace stream
 				ResetWindowSize ();
 //				m_TunnelsChangeSequenceNumber = m_SequenceNumber; // should be determined more precisely
 			}
+			
+			// Log actual hop count being used for verification
+			LogPrint (eLogDebug, "Streaming: Using outbound tunnel with ", m_CurrentOutboundTunnel->GetNumHops(), " hops for sSID=", m_SendStreamID);
 
 			std::vector<i2p::tunnel::TunnelMessageBlock> msgs;
 			for (const auto& it: packets)
@@ -1939,8 +2182,34 @@ namespace stream
 	void StreamingDestination::HandleNextPacket (Packet * packet)
 	{
 		uint32_t sendStreamID = packet->GetSendStreamID ();
+		uint32_t recvStreamID = packet->GetReceiveStreamID();
+		LogPrint (eLogDebug, "Streaming: HandleNextPacket sSID=", sendStreamID, " rSID=", recvStreamID,
+			" StreamingDestination=", this);
 		if (sendStreamID)
 		{
+			if (packet->IsSimpleMessage ()) {
+				// simple message
+				const auto payloadLen = static_cast<int>(packet->len) - (packet->GetPayload () - packet->buf);
+				if (payloadLen > 0)
+				{
+					std::string payload (packet->GetPayload (), packet->GetPayload () + payloadLen);
+					LogPrint (eLogDebug, "Streaming: Simple message payload: ", payload);
+				}
+				if (const auto it = m_Streams.find (sendStreamID); it != m_Streams.end ())
+					m_LastStream = it->second;
+				else
+				{
+					m_LastStream = std::make_shared<Stream> (m_Owner->GetService (), *this);
+					std::string streams;
+					for (const auto& [id, stream]: m_Streams) {
+						streams += std::to_string(id) + ", ";
+					}
+					LogPrint (eLogDebug, "Streaming: Can't find stream in ", streams);
+				}
+
+				m_LastStream->HandleSimpleMessage (packet);
+				return;
+			}
 			if (!m_LastStream || sendStreamID != m_LastStream->GetRecvStreamID ())
 			{
 				auto it = m_Streams.find (sendStreamID);
@@ -1955,6 +2224,7 @@ namespace stream
 			{
 				// ping
 				LogPrint (eLogInfo, "Streaming: Ping received sSID=", sendStreamID);
+				auto payloadLen = int(packet->len) - (packet->GetPayload () - packet->buf);
 				auto s = std::make_shared<Stream> (m_Owner->GetService (), *this);
 				s->HandlePing (packet);
 			}
@@ -2147,6 +2417,26 @@ namespace stream
 	{
 		if (m_Acceptor) m_Acceptor (nullptr);
 		m_Acceptor = nullptr;
+	}
+	
+	void StreamingDestination::SetSimpleMessageHandler (const SimpleMessageHandler& handler)
+	{
+		m_SimpleMessageHandler = handler;
+		LogPrint(eLogInfo, "Streaming: SimpleMessageHandler set, handler is ", (handler ? "valid" : "null"), 
+				 ", stored handler is ", (m_SimpleMessageHandler ? "valid" : "null"));
+	}
+	
+	void StreamingDestination::ResetSimpleMessageHandler ()
+	{
+		m_SimpleMessageHandler = nullptr;
+	}
+	
+	std::string StreamingDestination::CallSimpleMessageHandler (const std::string& message, const i2p::data::IdentHash& clientHash) const
+	{
+		if (m_SimpleMessageHandler) {
+			return m_SimpleMessageHandler(message, clientHash);
+		}
+		return ""; // Return empty string if no handler
 	}
 
 	void StreamingDestination::AcceptOnce (const Acceptor& acceptor)

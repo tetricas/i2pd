@@ -15,6 +15,7 @@
 #include <map>
 #include <thread>
 #include <boost/asio.hpp>
+#include <boost/asio/ssl.hpp>
 #include <sstream>
 #include "HTTP.h"
 
@@ -26,6 +27,11 @@ namespace http
 	const int TOKEN_EXPIRATION_TIMEOUT = 30; // in seconds
 	const int COMMAND_REDIRECT_TIMEOUT = 5; // in seconds
 	const int TRANSIT_TUNNELS_LIMIT = 1000000;
+
+	// SSL certificate constants
+	const long HTTP_CERTIFICATE_VALIDITY = 365*10; // 10 years
+	const char HTTP_CERTIFICATE_COMMON_NAME[] = "i2pd.http";
+	const char HTTP_CERTIFICATE_ORGANIZATION[] = "Purple I2P";
 
 	class HTTPConnection: public std::enable_shared_from_this<HTTPConnection>
 	{
@@ -79,6 +85,14 @@ namespace http
 				std::shared_ptr<boost::asio::ip::tcp::socket> newSocket);
 			void CreateConnection(std::shared_ptr<boost::asio::ip::tcp::socket> newSocket);
 
+			// HTTPS support for /router.info endpoint only
+			void StartHTTPS();
+			void AcceptHTTPS();
+			void HandleAcceptHTTPS(const boost::system::error_code& ecode,
+				std::shared_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>> socket);
+			void HandleRouterInfoRequest(std::shared_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>> socket);
+			void CreateCertificate (const char *crt_path, const char *key_path);
+
 		private:
 
 			bool m_IsRunning;
@@ -87,6 +101,12 @@ namespace http
 			boost::asio::executor_work_guard<boost::asio::io_context::executor_type> m_Work;
 			boost::asio::ip::tcp::acceptor m_Acceptor;
 			std::string m_Hostname;
+
+			// HTTPS members
+			bool m_HTTPSEnabled;
+			uint16_t m_HTTPSPort;
+			std::unique_ptr<boost::asio::ip::tcp::acceptor> m_HTTPSAcceptor;
+			std::unique_ptr<boost::asio::ssl::context> m_SSLContext;
 	};
 
 	//all the below functions are also used by Qt GUI, see mainwindow.cpp -> getStatusPageHtml

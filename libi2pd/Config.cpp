@@ -97,6 +97,10 @@ namespace config {
 			("http.webroot", value<std::string>()->default_value("/"),          "WebUI root path (default: / )")
 			("http.lang", value<std::string>()->default_value("english"),       "WebUI language (default: english )")
 			("http.showTotalTCSR", value<bool>()->default_value(false),         "Show additional value with total TCSR since router's start (default: false)")
+			("http.ssl", value<bool>()->default_value(false),                   "Enable HTTPS for /router.info endpoint")
+			("http.sslport", value<uint16_t>()->default_value(7071),            "HTTPS port for /router.info endpoint")
+			("http.sslcert", value<std::string>()->default_value("httpd.crt"),  "Path to SSL certificate file")
+			("http.sslkey", value<std::string>()->default_value("httpd.key"),   "Path to SSL private key file")
 		;
 
 		options_description httpproxy("HTTP Proxy options");
@@ -225,9 +229,10 @@ namespace config {
 
 		options_description reseed("Reseed options");
 		reseed.add_options()
-			("reseed.verify", value<bool>()->default_value(false),        "Verify .su3 signature")
+			("reseed.verify", value<bool>()->default_value(false),        "Verify .su3 signature and SSL certificates")
+			("reseed.cert", value<std::string>()->default_value(""),      "SHA256 hash of SSL certificate to verify (for certificate pinning)")
 			("reseed.threshold", value<uint16_t>()->default_value(25),    "Minimum number of known routers before requesting reseed")
-			("reseed.floodfill", value<std::string>()->default_value(""), "Ignored. Always empty")
+			("reseed.floodfill", value<std::string>()->default_value(""), "Path to local router.info file to reseed from")
 			("reseed.file", value<std::string>()->default_value(""),      "Path to local .su3 file or HTTPS URL to reseed from")
 			("reseed.zipfile", value<std::string>()->default_value(""),   "Path to local .zip file to reseed from")
 			("reseed.proxy", value<std::string>()->default_value(""),     "url for reseed proxy, supports http/socks")

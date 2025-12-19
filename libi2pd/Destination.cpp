@@ -1381,6 +1381,24 @@ namespace client
 			m_StreamingDestination->AcceptOnce (acceptor);
 	}
 
+	bool ClientDestination::SetSimpleMessageHandler (const stream::StreamingDestination::SimpleMessageHandler& handler)
+	{
+		if (!m_StreamingDestination)
+			return false;
+
+		m_StreamingDestination->SetSimpleMessageHandler (handler);
+		return true;
+	}
+
+	bool ClientDestination::ResetSimpleMessageHandler ()
+	{
+		if (!m_StreamingDestination)
+			return false;
+
+		m_StreamingDestination->ResetSimpleMessageHandler ();
+		return true;
+	}
+
 	std::shared_ptr<i2p::stream::StreamingDestination> ClientDestination::CreateStreamingDestination (uint16_t port, bool gzip)
 	{
 		auto dest = std::make_shared<i2p::stream::StreamingDestination> (GetSharedFromThis (), port, gzip);

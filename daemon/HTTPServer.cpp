@@ -8,16 +8,25 @@
 
 #include <iomanip>
 #include <sstream>
+#include <fstream>
 #include <thread>
 #include <memory>
 
 #include <boost/asio.hpp>
 #include <boost/algorithm/string.hpp>
 
+#include <openssl/x509.h>
+#include <openssl/pem.h>
+#include <openssl/evp.h>
+#include <openssl/rsa.h>
+#include <openssl/bn.h>
+#include <openssl/sha.h>
+
 #include "Base.h"
 #include "FS.h"
 #include "Log.h"
 #include "Config.h"
+#include "Crypto.h"
 #include "Tunnel.h"
 #include "Transports.h"
 #include "NetDb.hpp"
@@ -1503,7 +1512,7 @@ namespace http {
 	HTTPServer::HTTPServer (const std::string& address, int port):
 		m_IsRunning (false), m_Thread (nullptr), m_Work (m_Service.get_executor ()),
 		m_Acceptor (m_Service, boost::asio::ip::tcp::endpoint (boost::asio::ip::make_address(address), port)),
-		m_Hostname(address)
+		m_Hostname(address), m_HTTPSEnabled(false), m_HTTPSPort(0), m_HTTPSAcceptor(nullptr), m_SSLContext(nullptr)
 	{
 	}
 
@@ -1537,6 +1546,9 @@ namespace http {
 		m_Acceptor.listen ();
 		Accept ();
 
+		// Start HTTPS if enabled
+		StartHTTPS();
+
 		LoadExtCSS();
 	}
 
@@ -1549,6 +1561,15 @@ namespace http {
 		if (ec)
 			LogPrint (eLogDebug, "HTTPServer: Error while cancelling operations on acceptor: ", ec.message ());
 		m_Acceptor.close();
+
+		// Stop HTTPS acceptor if running
+		if (m_HTTPSAcceptor)
+		{
+			m_HTTPSAcceptor->cancel(ec);
+			if (ec)
+				LogPrint (eLogDebug, "HTTPServer: Error while cancelling operations on HTTPS acceptor: ", ec.message ());
+			m_HTTPSAcceptor->close();
+		}
 
 		m_Service.stop ();
 		if (m_Thread)
@@ -1599,6 +1620,264 @@ namespace http {
 	{
 		auto conn = std::make_shared<HTTPConnection> (m_Hostname, newSocket);
 		conn->Receive ();
+	}
+
+	// HTTPS support for /router.info endpoint only
+	
+	void HTTPServer::StartHTTPS()
+	{
+		i2p::config::GetOption("http.ssl", m_HTTPSEnabled);
+		if (!m_HTTPSEnabled)
+			return;
+
+		i2p::config::GetOption("http.sslport", m_HTTPSPort);
+		std::string address;
+		i2p::config::GetOption("http.address", address);
+
+		std::string http_cert, http_key;
+		i2p::config::GetOption("http.sslcert", http_cert);
+		i2p::config::GetOption("http.sslkey", http_key);
+
+		if (http_cert.at(0) != '/')
+			http_cert = i2p::fs::DataDirPath(http_cert);
+		if (http_key.at(0) != '/')
+			http_key = i2p::fs::DataDirPath(http_key);
+
+		if (!i2p::fs::Exists(http_cert) || !i2p::fs::Exists(http_key))
+		{
+			LogPrint(eLogInfo, "HTTPServer: Creating new certificate for HTTPS");
+			CreateCertificate(http_cert.c_str(), http_key.c_str());
+		}
+		else
+			LogPrint(eLogDebug, "HTTPServer: Using cert from ", http_cert);
+
+		m_SSLContext = std::make_unique<boost::asio::ssl::context>(boost::asio::ssl::context::sslv23);
+		m_SSLContext->set_options(boost::asio::ssl::context::default_workarounds | 
+			boost::asio::ssl::context::no_sslv2 | boost::asio::ssl::context::single_dh_use);
+		
+		boost::system::error_code ec;
+		m_SSLContext->use_certificate_file(http_cert, boost::asio::ssl::context::pem, ec);
+		if (!ec)
+			m_SSLContext->use_private_key_file(http_key, boost::asio::ssl::context::pem, ec);
+		if (ec)
+		{
+			LogPrint(eLogInfo, "HTTPServer: Failed to load certificate: ", ec.message(), ". Recreating");
+			CreateCertificate(http_cert.c_str(), http_key.c_str());
+			m_SSLContext->use_certificate_file(http_cert, boost::asio::ssl::context::pem, ec);
+			if (!ec)
+				m_SSLContext->use_private_key_file(http_key, boost::asio::ssl::context::pem, ec);
+			if (ec)
+			{
+				LogPrint(eLogError, "HTTPServer: Can't load certificates, HTTPS disabled");
+				m_HTTPSEnabled = false;
+				return;
+			}
+		}
+
+		// Create HTTPS acceptor
+		m_HTTPSAcceptor = std::make_unique<boost::asio::ip::tcp::acceptor>(m_Service,
+			boost::asio::ip::tcp::endpoint(boost::asio::ip::make_address(address), m_HTTPSPort));
+		m_HTTPSAcceptor->listen();
+		AcceptHTTPS();
+
+		LogPrint(eLogInfo, "HTTPServer: HTTPS enabled on port ", m_HTTPSPort);
+	}
+
+	void HTTPServer::AcceptHTTPS()
+	{
+		if (!m_HTTPSEnabled || !m_HTTPSAcceptor)
+			return;
+
+		auto socket = std::make_shared<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>(m_Service, *m_SSLContext);
+		m_HTTPSAcceptor->async_accept(socket->lowest_layer(),
+			std::bind(&HTTPServer::HandleAcceptHTTPS, this, std::placeholders::_1, socket));
+	}
+
+	void HTTPServer::HandleAcceptHTTPS(const boost::system::error_code& ecode,
+		std::shared_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>> socket)
+	{
+		if (ecode)
+		{
+			LogPrint(eLogError, "HTTPS Server: Accept error: ", ecode.message());
+			AcceptHTTPS();
+			return;
+		}
+
+		// Perform SSL handshake
+		socket->async_handshake(boost::asio::ssl::stream_base::server,
+			[this, socket](const boost::system::error_code& handshake_error)
+			{
+				if (handshake_error)
+				{
+					LogPrint(eLogError, "HTTPS Server: Handshake failed: ", handshake_error.message());
+					socket->lowest_layer().close();
+				}
+				else
+				{
+					HandleRouterInfoRequest(socket);
+				}
+			});
+
+		AcceptHTTPS();
+	}
+
+	void HTTPServer::HandleRouterInfoRequest(std::shared_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>> socket)
+	{
+		// Simple HTTP request handler for /router.info only
+		auto buffer = std::make_shared<std::array<char, 8192>>();
+		
+		boost::asio::async_read(*socket, boost::asio::buffer(*buffer), boost::asio::transfer_at_least(1),
+			[this, socket, buffer](const boost::system::error_code& ec, std::size_t bytes_transferred)
+			{
+				if (ec && ec != boost::asio::error::eof)
+				{
+					LogPrint(eLogError, "HTTPS Server: Read error: ", ec.message());
+					socket->lowest_layer().close();
+					return;
+				}
+
+				// Parse HTTP request - just check for GET /router.info
+				std::string request(buffer->data(), bytes_transferred);
+				bool isRouterInfo = (request.find("GET /router.info") == 0 || 
+				                     request.find("GET https://") != std::string::npos && request.find("/router.info") != std::string::npos);
+
+				if (isRouterInfo)
+				{
+					// Serve router.info
+					std::string dataDir = i2p::fs::GetDataDir();
+					std::string routerInfoPath = dataDir + i2p::fs::dirSep + "router.info";
+
+					std::ifstream file(routerInfoPath, std::ios::binary);
+					if (file)
+					{
+						file.seekg(0, std::ios::end);
+						size_t fileSize = file.tellg();
+						file.seekg(0, std::ios::beg);
+
+						std::vector<char> fileData(fileSize);
+						if (file.read(fileData.data(), fileSize))
+						{
+							std::ostringstream response;
+							response << "HTTP/1.1 200 OK\r\n";
+							response << "Content-Type: application/octet-stream\r\n";
+							response << "Content-Length: " << fileSize << "\r\n";
+							response << "Connection: close\r\n";
+							response << "\r\n";
+							std::string header = response.str();
+
+							// Send response
+							auto responseData = std::make_shared<std::vector<char>>();
+							responseData->insert(responseData->end(), header.begin(), header.end());
+							responseData->insert(responseData->end(), fileData.begin(), fileData.end());
+
+							boost::asio::async_write(*socket, boost::asio::buffer(*responseData),
+								[socket, responseData](const boost::system::error_code&, std::size_t)
+								{
+									boost::system::error_code ignored;
+									socket->shutdown(ignored);
+									socket->lowest_layer().close();
+								});
+
+							LogPrint(eLogInfo, "HTTPS Server: Served router.info to ", socket->lowest_layer().remote_endpoint());
+							return;
+						}
+					}
+				}
+
+				// 404 response
+				std::string response404 = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+				auto responseData = std::make_shared<std::string>(response404);
+				boost::asio::async_write(*socket, boost::asio::buffer(*responseData),
+					[socket, responseData](const boost::system::error_code&, std::size_t)
+					{
+						boost::system::error_code ignored;
+						socket->shutdown(ignored);
+						socket->lowest_layer().close();
+					});
+			});
+	}
+
+	void HTTPServer::CreateCertificate (const char *crt_path, const char *key_path)
+	{
+		FILE *f = NULL;
+#if (OPENSSL_VERSION_NUMBER >= 0x030000000) // since 3.0.0
+		EVP_PKEY *  pkey = EVP_RSA_gen(4096); // e = 65537
+#else
+		EVP_PKEY * pkey = EVP_PKEY_new ();
+		RSA * rsa = RSA_new ();
+		BIGNUM * e = BN_dup (i2p::crypto::GetRSAE ());
+		RSA_generate_key_ex (rsa, 4096, e, NULL);
+		BN_free (e);
+		if (rsa) EVP_PKEY_assign_RSA (pkey, rsa);
+		else
+		{
+			LogPrint (eLogError, "HTTPServer: Can't create RSA key for certificate");
+			EVP_PKEY_free (pkey);
+			return;
+		}
+#endif
+		X509 * x509 = X509_new ();
+		ASN1_INTEGER_set (X509_get_serialNumber (x509), 1);
+		X509_gmtime_adj (X509_getm_notBefore (x509), 0);
+		X509_gmtime_adj (X509_getm_notAfter (x509), HTTP_CERTIFICATE_VALIDITY*24*60*60); // expiration
+		X509_set_pubkey (x509, pkey); // public key
+		X509_NAME * name = X509_get_subject_name (x509);
+		X509_NAME_add_entry_by_txt (name, "C",  MBSTRING_ASC, (unsigned char *)"A1", -1, -1, 0); // country (Anonymous proxy)
+		X509_NAME_add_entry_by_txt (name, "O",  MBSTRING_ASC, (unsigned char *)HTTP_CERTIFICATE_ORGANIZATION, -1, -1, 0); // organization
+		X509_NAME_add_entry_by_txt (name, "CN", MBSTRING_ASC, (unsigned char *)HTTP_CERTIFICATE_COMMON_NAME, -1, -1, 0); // common name
+		X509_set_issuer_name (x509, name); // set issuer to ourselves
+		X509_sign (x509, pkey, EVP_sha1 ()); // sign, last param must be NULL for EdDSA
+
+		// save cert
+		if ((f = fopen (crt_path, "wb")) != NULL)
+		{
+			LogPrint (eLogInfo, "HTTPServer: Saving new cert to ", crt_path);
+			PEM_write_X509 (f, x509);
+			fclose (f);
+
+			// Calculate SHA256 fingerprint and save to file
+			unsigned char hash[SHA256_DIGEST_LENGTH];
+			unsigned int hashLen = SHA256_DIGEST_LENGTH;
+			unsigned char* certDER = NULL;
+			int certDERLen = i2d_X509(x509, &certDER);
+			if (certDERLen > 0 && certDER)
+			{
+				SHA256(certDER, certDERLen, hash);
+				OPENSSL_free(certDER);
+
+				// Convert to hex string
+				std::ostringstream hashStr;
+				for (unsigned int i = 0; i < hashLen; i++)
+					hashStr << std::hex << std::setw(2) << std::setfill('0') << (int)hash[i];
+
+				// Write to hash file
+				std::string hashFilePath = std::string(crt_path) + "_hash.txt";
+				std::ofstream hashFile(hashFilePath);
+				if (hashFile)
+				{
+					hashFile << hashStr.str() << std::endl;
+					hashFile.close();
+					LogPrint(eLogInfo, "HTTPServer: Certificate SHA256 fingerprint: ", hashStr.str());
+					LogPrint(eLogInfo, "HTTPServer: Fingerprint saved to ", hashFilePath);
+				}
+				else
+					LogPrint(eLogError, "HTTPServer: Can't write hash file: ", hashFilePath);
+			}
+		}
+		else
+			LogPrint (eLogError, "HTTPServer: Can't write cert: ", strerror(errno));
+		X509_free (x509);
+
+		// save key
+		if ((f = fopen (key_path, "wb")) != NULL)
+		{
+			LogPrint (eLogInfo, "HTTPServer: saving cert key to ", key_path);
+			PEM_write_PrivateKey (f, pkey, NULL, NULL, 0, NULL, NULL);
+			fclose (f);
+		}
+		else
+			LogPrint (eLogError, "HTTPServer: Can't write key: ", strerror(errno));
+		EVP_PKEY_free (pkey);
 	}
 } // http
 } // i2p

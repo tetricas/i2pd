@@ -18,6 +18,11 @@
 
 namespace i2p
 {
+namespace http
+{
+	struct URL;
+}
+
 namespace data
 {
 
@@ -27,10 +32,11 @@ namespace data
 
 		public:
 
-			Reseeder();
-			~Reseeder();
+			Reseeder() = default;
+			~Reseeder() = default;
 			void Bootstrap ();
 			int ReseedFromServers ();
+			void ProcessRIFile (const char * filename);
 			int ProcessSU3File (const char * filename);
 			int ProcessZIPFile (const char * filename);
 
@@ -47,9 +53,10 @@ namespace data
 			bool FindZipDataDescriptor (std::istream& s);
 
 			std::string HttpsRequest (const std::string& address);
-			std::string YggdrasilRequest (const std::string& address);
+			std::string ConnectAndReseed (http::URL& url, const http::URL& proxyUrl);
 			template<typename Stream>
 			std::string ReseedRequest (Stream& s, const std::string& uri);
+			std::string YggdrasilRequest (const std::string& address);
 
 		private:
 

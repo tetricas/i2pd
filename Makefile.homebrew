@@ -1,5 +1,5 @@
 # root directory holding homebrew
-BREWROOT = /opt/homebrew
+BREWROOT = /usr/local
 BOOSTROOT = ${BREWROOT}/opt/boost
 SSLROOT = ${BREWROOT}/opt/openssl@1.1
 UPNPROOT = ${BREWROOT}/opt/miniupnpc
